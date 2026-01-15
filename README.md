@@ -1,67 +1,106 @@
+
 # MidnightC2
 
-MidnightC2 is a powerful, C#-based Command & Control (C2) framework designed for authorized red team operations and security research. It leverages **Telegram** as a communication channel, providing a stealthy and reliable way to manage remote agents.
+**MidnightC2** is a lightweight, stealthy Remote Administration Tool (RAT) / Command and Control (C2) agent that utilizes **Telegram** as its communication channel. This allows for secure, encrypted, and convenient control of remote machines directly from your Telegram app.
 
-## ⚠️ Disclaimer
-**This project is for Educational Purposes and Authorized Security Testing ONLY.**
-The developer is not responsible for any misuse of this tool. Do not use this against systems you do not own or do not have explicit permission to test.
+> **⚠️ DISCLAIMER: THIS SOFTWARE IS FOR EDUCATIONAL PURPOSES AND ETHICAL SECURITY TESTING ONLY. DO NOT USE ON SYSTEMS YOU DO NOT OWN OR HAVE EXPLICIT PERMISSION TO TEST. THE AUTHOR IS NOT RESPONSIBLE FOR ANY MISUSE.**
 
-## 🚀 Features
+## ✨ Features
 
-MidnightC2 comes packed with advanced post-exploitation features:
+MidnightC2 comes packed with a wide range of powerful features for system administration and monitoring:
 
-### 🖥️ Remote Access & Control
-- **Remote Shell**: Execute system commands silently.
-- **Process Management**: List and kill running processes.
-- **File Manager**: Upload and download files from the target.
-- **VNC & AnyDesk**: Full remote desktop control capabilities.
+*   **Remote Shell**: Execute system commands (CMD/PowerShell) remotely.
+*   **File Management**:
+    *   Download files from the target.
+    *   Upload files to the target.
+    *   Navigate directories (`cd`, `ls`).
+*   **Surveillance**:
+    *   **Screenshot**: Capture not-detected screenshots.
+    *   **Webcam**: Snap pictures or stream webcam feed.
+    *   **Keylogger**: Log keystrokes.
+    *   **Location**: Get approximate device location.
+*   **System Interaction**:
+    *   **Process Manager**: List and kill processes.
+    *   **System Info**: Get detailed hardware and OS information.
+    *   **Power Control**: Shutdown or Restart the machine.
+    *   **Self Destruct**: Uninstall and remove traces of the agent.
+*   **Network & Connectivity**:
+    *   **Reverse Shell**: Spawn a persistent reverse shell session.
+    *   **VNC**: Remote desktop viewing.
+    *   **AnyDesk**: Enable/Configure AnyDesk for remote access.
+    *   **FTP**: FTP server capabilities.
+*   **Browser Data**:
+    *   **Cookie Stealer**: Extract browser cookies.
+    *   **Clear Cookies**: Wipe browser data.
+*   **Other**:
+    *   **Wallpaper**: Change the desktop wallpaper.
+    *   **Job Management**: Manage background tasks.
 
-### 🕵️ Surveillance & Monitoring
-- **Webcam Streaming**: Live stream or capture photos from connected webcams.
-- **Screen Streaming**: View the target's screen in real-time.
-- **Keylogger**: Capture keystrokes (supports offline logging).
-- **Location Tracking**: Approximate geolocation of the target.
-- **System Information**: Gather detailed OS and hardware specs.
-
-### 🔐 Data Extraction
-- **Cookie Stealer**: Extract cookies from Chrome, Edge, and Brave browsers.
-- **Bypass Capability**: Uses remote debugging protocol to bypass browser encryption (App-Bound encryption).
-
-### 🛡️ Persistence & Stealth
-- **Startup Persistence**: Automatically runs on system boot.
-- **Self Destruct**: Remotely remove the agent and all traces.
-- **Anti-Analysis**: (Optional) Sandbox and VM detection.
-
-## 🛠️ Build Instructions
+## 🚀 Getting Started
 
 ### Prerequisites
-- Visual Studio 2019/2022 (Community or higher)
-- .NET Framework 4.7.2 or higher
-- Telegram Bot Token & Chat ID
 
-### How to Build
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/teelawat/MidnightC2.git
-   ```
-2. **Open the Solution**
-   Open `MidnightC2.sln` in Visual Studio.
-3. **Build the Builder**
-   - Select `Release` configuration.
-   - Build the `MidnightBuilder` project.
-4. **Run the Builder**
-   - Navigate to `MidnightBuilder/bin/Release` (or run from VS).
-   - Enter your **Telegram Bot Token**.
-   - Enter your **Telegram User ID**.
-   - Specify the output filename.
-5. **Deploy**
-   - The verified payload will be generated in the `Output` folder.
+*   Windows OS
+*   [.NET Framework 4.7.2](https://dotnet.microsoft.com/download/dotnet-framework/net472) or higher
+*   [Visual Studio 2019/2022](https://visualstudio.microsoft.com/) (for building)
 
-## 📡 Communication
-All commands and results are sent via your private Telegram Bot. This ensures traffic looks like legitimate HTTPS application traffic.
+### Installation & Building
+
+You can build the agent easily using the included **MidnightBuilder** tool.
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/teelawat/MidnightC2.git
+    cd MidnightC2
+    ```
+
+2.  **Create a Telegram Bot:**
+    *   Open Telegram and search for `@BotFather`.
+    *   Send `/newbot` and follow the instructions to get your **HTTP API Token**.
+    *   Get your numeric **User ID** (you can use `@userinfobot` to find this).
+
+3.  **Build the Agent:**
+    *   Open the `MidnightC2.sln` in Visual Studio and build the **MidnightBuilder** project.
+    *   Run `MidnightBuilder.exe` (located in `MidnightBuilder/bin/Debug` or `Release`).
+    *   Follow the on-screen prompts:
+        *   Enter your **Bot Token**.
+        *   Enter your **User ID**.
+        *   Specify the output filename (e.g., `SecurityHost.exe`).
+    *   The builder will automatically compile the agent with your configuration injected.
+
+4.  **Output:**
+    *   The compiled agent will be available in the `Output` folder.
+
+## 📖 Usage
+
+1.  **Deploy**: Transfer the generated executable to the target machine.
+2.  **Run**: Execute the file. It will run silently in the background (unless configured otherwise).
+3.  **Control**:
+    *   Open your Telegram Bot.
+    *   The bot will send a "Online" notification when the agent connects.
+    *   Type `/help` to see a full list of available commands.
+
+### Common Commands
+
+*   `/help` - Show all commands.
+*   `/shell <command>` - Run a CMD command.
+*   `/screenshot` - Take a screenshot.
+*   `/download <path>` - Download a file from the target.
+*   `/upload` - Upload a file (reply to the file with this command).
+*   `/kill` - Kill the agent process.
+*   `/selfdestruct` - Remove the agent from the system.
+
+## 🛠 Project Structure
+
+*   `MidnightAgent/`: The core agent source code.
+    *   `Features/`: Individual feature implementations (plugins).
+    *   `Core/`: Core logic and configuration.
+*   `MidnightBuilder/`: The builder tool to configure and compile the agent.
 
 ## 🤝 Contributing
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
-## 📜 License
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📄 License
+
 This project is licensed under the MIT License - see the LICENSE file for details.
