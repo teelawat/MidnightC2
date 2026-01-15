@@ -1,0 +1,8 @@
+is_global = true
+build_property.RootNamespace = MidnightAgent
+build_property.ProjectDir = D:\Work5\dystopia-c2-main\dystopia-c2-main\MidnightC2\MidnightAgent\
+build_property.EnableComHosting = 
+build_property.EnableGeneratedComInterfaceComImportInterop = 
+build_property.CsWinRTUseWindowsUIXamlProjections = false
+build_property.EffectiveAnalysisLevelStyle = 
+build_property.EnableCodeStyleSeverity = 

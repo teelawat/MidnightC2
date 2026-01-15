@@ -1,0 +1,2 @@
+C:\Users\admin\Downloads\dystopia-c2-main\dystopia-c2-main\MidnightC2\MidnightBuilder\bin\Release\net8.0-windows\win-x64\publish\MidnightBuilder.pdb
+C:\Users\admin\Downloads\dystopia-c2-main\dystopia-c2-main\MidnightC2\MidnightBuilder\bin\Release\net8.0-windows\win-x64\publish\MidnightBuilder.exe
