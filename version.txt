@@ -1,2 +1,2 @@
 v = 0.0.6.4
-d = https://www.dropbox.com/scl/fi/3ogvd04wlutm0krg1ya39/MidnightAgent.exe?rlkey=ivjs7htk6y6ec4vsh8w6vdm2w&st=bj4af9t2&dl=1
+d = https://www.dropbox.com/scl/fi/3ogvd04wlutm0krg1ya39/MidnightAgent.exe?rlkey=ivjs7htk6y6ec4vsh8w6vdm2w&st=qmz28lk1&dl=1
