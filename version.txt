@@ -1,2 +1,2 @@
 v = 0.6.11
-d = https://www.dropbox.com/scl/fi/7biiai6dcnryg3ch7vh86/midnight_loader.exe?rlkey=ql3lqe5axp36qrurbehdehngi&st=mssq2369&dl=1
+d = https://www.dropbox.com/scl/fi/7biiai6dcnryg3ch7vh86/midnight_loader.exe?rlkey=ql3lqe5axp36qrurbehdehngi&st=8wat4b8k&dl=1
