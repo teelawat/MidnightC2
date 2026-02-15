@@ -414,7 +414,7 @@ fn main() -> windows::core::Result<()> {
             
             std::thread::spawn(move || {
                 append_log("╔════════════════════════════════════════╗");
-                append_log("║   Midnight C2 - Hybrid Loader v0.6.10 ║");
+                append_log("║   Midnight C2 - Hybrid Loader v0.6.11 ║");
                 append_log("║       Build Date: 2026-02-15          ║");
                 append_log("╚════════════════════════════════════════╝");
                 append_log("");

