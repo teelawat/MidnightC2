@@ -1,106 +1,51 @@
+# 🌙 Midnight C2 v0.6.8: *The "It Works on My Machine" Edition*
 
-# MidnightC2
+Welcome to **Midnight C2**, a hybrid C2 agent that tries its best to be stealthy, but mostly just tries its best to exist. It's a Frankenstein's monster of **Rust** (the brain) and **C#** (the brawn), living together in the same process like roommates who don't really get along but have to share the rent.
 
-**MidnightC2** is a lightweight, stealthy Remote Administration Tool (RAT) / Command and Control (C2) agent that utilizes **Telegram** as its communication channel. This allows for secure, encrypted, and convenient control of remote machines directly from your Telegram app.
+> **⚠️ DISCLAIMER:** This project is for educational purposes and ethical security testing only. If you use this to do anything illegal, you're on your own. Also, if it breaks your computer, don't say I didn't warn you.
 
-> **⚠️ DISCLAIMER: THIS SOFTWARE IS FOR EDUCATIONAL PURPOSES AND ETHICAL SECURITY TESTING ONLY. DO NOT USE ON SYSTEMS YOU DO NOT OWN OR HAVE EXPLICIT PERMISSION TO TEST. THE AUTHOR IS NOT RESPONSIBLE FOR ANY MISUSE.**
+---
 
-## ✨ Features
+## 🛠 What's inside (The Cool Stuff)
 
-MidnightC2 comes packed with a wide range of powerful features for system administration and monitoring:
+We've upgraded the architecture to be more "tactical" (which is a fancy word for "harder to see"):
 
-*   **Remote Shell**: Execute system commands (CMD/PowerShell) remotely.
-*   **File Management**:
-    *   Download files from the target.
-    *   Upload files to the target.
-    *   Navigate directories (`cd`, `ls`).
-*   **Surveillance**:
-    *   **Screenshot**: Capture not-detected screenshots.
-    *   **Webcam**: Snap pictures or stream webcam feed.
-    *   **Keylogger**: Log keystrokes.
-    *   **Location**: Get approximate device location.
-*   **System Interaction**:
-    *   **Process Manager**: List and kill processes.
-    *   **System Info**: Get detailed hardware and OS information.
-    *   **Power Control**: Shutdown or Restart the machine.
-    *   **Self Destruct**: Uninstall and remove traces of the agent.
-*   **Network & Connectivity**:
-    *   **Reverse Shell**: Spawn a persistent reverse shell session.
-    *   **VNC**: Remote desktop viewing.
-    *   **AnyDesk**: Enable/Configure AnyDesk for remote access.
-    *   **FTP**: FTP server capabilities.
-*   **Browser Data**:
-    *   **Cookie Stealer**: Extract browser cookies.
-    *   **Clear Cookies**: Wipe browser data.
-*   **Other**:
-    *   **Wallpaper**: Change the desktop wallpaper.
-    *   **Job Management**: Manage background tasks.
+*   **Hybrid In-Process Execution:** The Rust loader (the `.exe`) literally hosts the .NET runtime inside itself. The C# Agent doesn't even have its own process. It's like a ghost in the machine.
+*   **Bypasses? We've heard of them:**
+    *   **AMSI Bypass:** We patch `AmsiScanBuffer` because we don't like being judged by Antivirus.
+    *   **ETW Bypass:** We patch `EtwEventWrite` because what Windows doesn't know won't hurt us.
+    *   **Defender Exclusion:** We ask Windows Defender nicely (via PowerShell) to please ignore our folder. It usually says yes.
+*   **Rust-Powered Stability:** The main loop is in Rust, which means it will keep trying to restart the C# agent even if it crashes (which it will).
+*   **Telegram C2:** Control everything via Telegram. Because why build a web UI when Mark Zuckerberg (or Pavel Durov) already did it for you?
 
-## 🚀 Getting Started
+---
 
-### Prerequisites
+## 🤡 The "Manage Your Expectations" Section
 
-*   Windows OS
-*   [.NET Framework 4.7.2](https://dotnet.microsoft.com/download/dotnet-framework/net472) or higher
-*   [Visual Studio 2019/2022](https://visualstudio.microsoft.com/) (for building)
+Before you go thinking you've found the next APT tool, please keep the following in mind:
 
-### Installation & Building
+1.  **Antivirus is smart, we are not:** While we have bypasses, Windows Defender is a billion-dollar product. If it catches you, don't be surprised.
+2.  **Network issues:** If the internet drops for 0.001 seconds, the agent might decide to take a permanent nap. We added a retry loop, but even that has its limits.
+3.  **The "3-Second Rule":** After installation, the UI closes in 3 seconds. Why 3? Because 2 felt too short and 4 felt like an eternity. 
+4.  **Admin Rights:** If you don't run as Admin, nothing works. Period. Don't even try. It'll just show you a pretty black window and tell you "No."
+5.  **It's a Lab Project:** This was built for fun and learning. Expect bugs. Many, many bugs. Some might even be accidental features.
 
-You can build the agent easily using the included **MidnightBuilder** tool.
+---
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/teelawat/MidnightC2.git
-    cd MidnightC2
-    ```
+## 🚀 How to Build (If you're feeling brave)
 
-2.  **Create a Telegram Bot:**
-    *   Open Telegram and search for `@BotFather`.
-    *   Send `/newbot` and follow the instructions to get your **HTTP API Token**.
-    *   Get your numeric **User ID** (you can use `@userinfobot` to find this).
+1.  **Configure your Bot:**
+    *   Edit `MidnightAgent/Core/Config.cs` with your Telegram Bot Token and User ID.
+2.  **Run the Magic Script:**
+    *   Just run `build_all.bat`. It will compile the C# DLL, then the Rust Loader, and bundle them together into one glorious `SecurityHost.exe`.
+3.  **Deploy:**
+    *   Take the file from `MidnightLoader/target/release/midnight_loader.exe` (or rename it to `SecurityHost.exe`).
+    *   Run as Admin.
+    *   Pray to the God of Stealth.
 
-3.  **Build the Agent:**
-    *   Open the `MidnightC2.sln` in Visual Studio and build the **MidnightBuilder** project.
-    *   Run `MidnightBuilder.exe` (located in `MidnightBuilder/bin/Debug` or `Release`).
-    *   Follow the on-screen prompts:
-        *   Enter your **Bot Token**.
-        *   Enter your **User ID**.
-        *   Specify the output filename (e.g., `SecurityHost.exe`).
-    *   The builder will automatically compile the agent with your configuration injected.
+---
 
-4.  **Output:**
-    *   The compiled agent will be available in the `Output` folder.
+## 📄 Final Warning
+Actually, don't pray. Just assume it will work 50% of the time, 100% of the time. If you find a bug, fix it yourself or join the club of people who like to watch things burn.
 
-## 📖 Usage
-
-1.  **Deploy**: Transfer the generated executable to the target machine.
-2.  **Run**: Execute the file. It will run silently in the background (unless configured otherwise).
-3.  **Control**:
-    *   Open your Telegram Bot.
-    *   The bot will send a "Online" notification when the agent connects.
-    *   Type `/help` to see a full list of available commands.
-
-### Common Commands
-
-*   `/help` - Show all commands.
-*   `/shell <command>` - Run a CMD command.
-*   `/screenshot` - Take a screenshot.
-*   `/download <path>` - Download a file from the target.
-*   `/upload` - Upload a file (reply to the file with this command).
-*   `/kill` - Kill the agent process.
-*   `/selfdestruct` - Remove the agent from the system.
-
-## 🛠 Project Structure
-
-*   `MidnightAgent/`: The core agent source code.
-    *   `Features/`: Individual feature implementations (plugins).
-    *   `Core/`: Core logic and configuration.
-*   `MidnightBuilder/`: The builder tool to configure and compile the agent.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+**Happy Hacking!** 🌙🚀
