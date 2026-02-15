@@ -49,6 +49,18 @@ namespace MidnightAgent.Features
                     return FeatureResult.Fail("Usage: /update <url> OR /update <id> <url>");
                 }
 
+                return await PerformUpdate(url);
+            }
+            catch (Exception ex)
+            {
+                return FeatureResult.Fail($"Update Failed: {ex.Message}");
+            }
+        }
+
+        public async Task<FeatureResult> PerformUpdate(string url)
+        {
+            try
+            {
                 if (!Uri.IsWellFormedUriString(url, UriKind.Absolute))
                 {
                     return FeatureResult.Fail("Invalid URL format.");
@@ -86,14 +98,31 @@ namespace MidnightAgent.Features
                 string updaterPath = Path.Combine(tempFolder, "updater.bat");
                 
                 string updaterScript = $@"@echo off
-timeout /t 3 /nobreak > nul
-:retry
-del /f /q ""{currentExe}""
-if exist ""{currentExe}"" goto retry
-copy /y ""{tempPath}"" ""{currentExe}""
-start """" ""{currentExe}""
-del /f /q ""{tempPath}""
-del /f /q ""%~f0""
+timeout /t 5 /nobreak > nul
+
+REM 1. Try to backup existing agent (Move is safer than Del)
+if exist ""{currentExe}"" (
+    move /y ""{currentExe}"" ""{currentExe}.bak"" > nul
+)
+
+REM 2. Try to place new agent
+copy /y ""{tempPath}"" ""{currentExe}"" > nul
+
+REM 3. Verify success
+if exist ""{currentExe}"" (
+    REM Success! Start new agent
+    start """" ""{currentExe}""
+    REM Cleanup backup later (or leave it as fallback)
+    del /f /q ""{currentExe}.bak"" > nul
+) else (
+    REM FAILED! (AV blocked copy?). RESTORE BACKUP IMMEDIATELY!
+    move /y ""{currentExe}.bak"" ""{currentExe}"" > nul
+    start """" ""{currentExe}""
+)
+
+REM Cleanup temp
+del /f /q ""{tempPath}"" > nul
+del /f /q ""%~f0"" > nul
 ";
                 File.WriteAllText(updaterPath, updaterScript);
 
@@ -106,7 +135,7 @@ del /f /q ""%~f0""
                     UseShellExecute = false
                 });
 
-                // Suicide
+                // Suicide to allow file operations
                 Environment.Exit(0);
                 return FeatureResult.Ok("🔄 Update initiating... (Agent restarting)");
             }

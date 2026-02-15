@@ -94,7 +94,7 @@ namespace MidnightAgent.Core
 🔧 CPU: {CPU}
 🔐 Admin: {(IsAdmin ? "Yes ✅" : "No ❌")}
 ⚡ SYSTEM: {(IsSystem ? "Yes ✅" : "No ❌")}
-📦 Version: v5.3 (AnyDesk) [Build {DateTime.Now:HHmm}]";
+📦 Version: {Version}";
         }
 
         private static string GenerateId()

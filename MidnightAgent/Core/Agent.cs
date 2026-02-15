@@ -29,8 +29,8 @@ namespace MidnightAgent.Core
             Logger.Log("============================================");
             Logger.Log("Agent started - beginning main loop");
 
-            // Send online notification
-            SendOnlineNotification();
+            // Start Auto Updater
+            AutoUpdater.Start(_cts.Token);
 
             // Start polling loop with auto-reconnect
             while (_running)
@@ -71,7 +71,10 @@ namespace MidnightAgent.Core
             _cts.Cancel();
         }
 
-        private void SendOnlineNotification()
+        /// <summary>
+        /// Send online notification (called once from Program.Run)
+        /// </summary>
+        public void SendOnlineNotificationOnce()
         {
             try
             {

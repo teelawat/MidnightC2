@@ -23,7 +23,7 @@ namespace MidnightAgent.Telegram
         // Lazy ACK State
         private int _committedOffset = 0;
         private readonly System.Collections.Generic.HashSet<int> _processedUpdateIds = new System.Collections.Generic.HashSet<int>();
-        private const int RETENTION_SECONDS = 60; // Keep updates visible for 60s
+
 
         private const string API_BASE = "https://api.telegram.org/bot";
 
@@ -138,17 +138,21 @@ namespace MidnightAgent.Telegram
         /// </summary>
         private Random _random = new Random();
 
+        // Local Time Tracking for Retention
+        private readonly System.Collections.Generic.Dictionary<int, DateTime> _updateFirstSeenParams = new System.Collections.Generic.Dictionary<int, DateTime>();
+        private const int RETENTION_SECONDS = 120; // Keep updates visible for 120s (2 mins) to allow all agents to sync
+
         /// <summary>
-        /// Start polling for updates (blocking) with Lazy ACK
+        /// Start polling for updates (blocking) with Broadcast-Friendly Lazy ACK
         /// </summary>
         public void StartPolling(CancellationToken ct)
         {
-            // Initial Random Delay to desync multiple agents
+            // Initial Random Delay to desync multiple agents slightly
             Thread.Sleep(_random.Next(1000, 5000));
 
-            // --- SAFETY: Flush old pending updates on startup ---
-            // This prevents "Death Loops" where an agent restarts and immediately re-processes the command that killed it (or updated it).
-            try
+            // [STARTUP CLEANUP]
+            // Flush old updates so we don't re-process commands sent while we were offline/restarting.
+            try 
             {
                 var initialUpdates = GetUpdates();
                 if (initialUpdates != null && initialUpdates.Count > 0)
@@ -161,8 +165,20 @@ namespace MidnightAgent.Telegram
                     }
                     if (maxId > 0)
                     {
-                        _committedOffset = maxId + 1;
-                        System.Diagnostics.Debug.WriteLine($"[Startup] Flushed {initialUpdates.Count} old updates. Offset -> {_committedOffset}");
+                        // We do NOT call API to delete them (lazy ack logic might still need them involved elsewhere)
+                        // BUT we mark them as "processed" or simply skip logic locally.
+                        // Actually, for "Broadcast" to work, we CANNOT delete them from Server if other agents need them.
+                        // So we just add them to _processedUpdateIds locally so WE don't run them.
+                        
+                        foreach(var u in initialUpdates)
+                        {
+                            int uid = u["update_id"].Value<int>();
+                            _processedUpdateIds.Add(uid);
+                            // Also mark as 'Seen' so retention logic handles cleanup eventually
+                            _updateFirstSeenParams[uid] = DateTime.Now.AddSeconds(-RETENTION_SECONDS); // Mark as old
+                        }
+                        
+                        System.Diagnostics.Debug.WriteLine($"[Startup] Ignored {initialUpdates.Count} pending updates.");
                     }
                 }
             }
@@ -175,34 +191,28 @@ namespace MidnightAgent.Telegram
                     JArray updates = GetUpdates();
                     if (updates == null || updates.Count == 0)
                     {
-                        // Random delay retry to avoid synchronized hammering
+                        // Random delay retry
                         Thread.Sleep(_random.Next(2000, 4000)); 
                         continue;
                     }
 
                     int maxUpdateIdInBatch = 0;
-                    long latestUpdateTimestamp = 0;
+                    bool readyToCommit = true;
 
                     foreach (var update in updates)
                     {
                         int updateId = update["update_id"].Value<int>();
                         maxUpdateIdInBatch = Math.Max(maxUpdateIdInBatch, updateId);
 
-                        // Track timestamp to determine retention (approximate)
-                        // Message time is robust; callback_query also has message.date
-                        long msgTime = 0;
-                        if (update["message"] != null) msgTime = update["message"]["date"]?.Value<long>() ?? 0;
-                        else if (update["callback_query"]?["message"] != null) msgTime = update["callback_query"]["message"]["date"]?.Value<long>() ?? 0;
-                        
-                        latestUpdateTimestamp = Math.Max(latestUpdateTimestamp, msgTime);
-
-                        // ONLY Process if we haven't seen this specific UpdateID in this cycle
+                        // 1. Process Update (If new to us)
                         if (!_processedUpdateIds.Contains(updateId))
                         {
                             _processedUpdateIds.Add(updateId);
+                            _updateFirstSeenParams[updateId] = DateTime.Now; // Track local discovery time
+                            
                             try
                             {
-                                System.Diagnostics.Debug.WriteLine($"[LazyACK] Processing New Update: {updateId}");
+                                System.Diagnostics.Debug.WriteLine($"[Broadcast] Processing New Update: {updateId}");
                                 ProcessUpdate(update);
                             }
                             catch (Exception ex)
@@ -210,35 +220,45 @@ namespace MidnightAgent.Telegram
                                 System.Diagnostics.Debug.WriteLine($"Process update error: {ex.Message}");
                             }
                         }
+
+                        // 2. Check Retention (Should we let others see this?)
+                        if (_updateFirstSeenParams.ContainsKey(updateId))
+                        {
+                            double ageSeconds = (DateTime.Now - _updateFirstSeenParams[updateId]).TotalSeconds;
+                            if (ageSeconds < RETENTION_SECONDS)
+                            {
+                                // This update is too fresh! We must NOT acknowledge it to Telegram yet.
+                                // This forces Telegram to re-send this update to OTHER agents polling now.
+                                readyToCommit = false;
+                            }
+                        }
                     }
 
-                    // --- LAZY ACK LOGIC ---
-                    // Check age of the latest update in this batch
-                    long distinctNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                    long age = distinctNow - latestUpdateTimestamp;
-
-                    // If updates are "old enough" (older than retention window), we allow committing them.
-                    // Otherwise, we loop again with SAME offset (peeking).
-                    
-                    if (latestUpdateTimestamp > 0 && age < RETENTION_SECONDS)
+                    // --- BROADCAST ACK LOGIC ---
+                    if (readyToCommit && maxUpdateIdInBatch > 0)
                     {
-                        // Updates are too fresh! Keep them in queue for other agents.
-                        // Do NOT advance _committedOffset.
-                        System.Diagnostics.Debug.WriteLine($"[LazyACK] Peeking... (Age: {age}s < {RETENTION_SECONDS}s). Buffer: {_processedUpdateIds.Count}");
-                        // Random jitter while peeking
-                        Thread.Sleep(_random.Next(1500, 3500)); 
+                        // All messages in this batch are old enough. effectively "expired" from our local perspective.
+                        // We assume other agents have had chance to see them.
+                        // Now we can safely tell Telegram to invoke `offset` to delete them.
+                        
+                        System.Diagnostics.Debug.WriteLine($"[Broadcast] Committing Offset -> {maxUpdateIdInBatch + 1}");
+                        _committedOffset = maxUpdateIdInBatch + 1;
+
+                        // Cleanup memory
+                        var keysToRemove = new System.Collections.Generic.List<int>();
+                        foreach(var kvp in _updateFirstSeenParams)
+                        {
+                            if (kvp.Key <= maxUpdateIdInBatch) keysToRemove.Add(kvp.Key);
+                        }
+                        foreach(var k in keysToRemove) _updateFirstSeenParams.Remove(k);
+                        _processedUpdateIds.RemoveWhere(id => id <= maxUpdateIdInBatch);
                     }
                     else
                     {
-                        // Updates are old or invalid timestamp. Commit them.
-                        if (maxUpdateIdInBatch > 0)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[LazyACK] Committing Offset -> {maxUpdateIdInBatch + 1}");
-                            _committedOffset = maxUpdateIdInBatch + 1;
-                            
-                            // Cleanup tracking to free memory
-                            _processedUpdateIds.RemoveWhere(id => id <= maxUpdateIdInBatch);
-                        }
+                        // Hold back! Don't confirm receipt to Telegram yet.
+                        // Just loop again. effectively "Peeking" the queue.
+                        System.Diagnostics.Debug.WriteLine($"[Broadcast] Holding updates for others... (Batch Max: {maxUpdateIdInBatch})");
+                        Thread.Sleep(_random.Next(2000, 4000));
                     }
                 }
                 catch (WebException ex)

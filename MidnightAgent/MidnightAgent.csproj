@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Library</OutputType>
     <TargetFramework>net48</TargetFramework>
     <RootNamespace>MidnightAgent</RootNamespace>
     <AssemblyName>MidnightAgent</AssemblyName>
