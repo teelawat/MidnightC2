@@ -300,6 +300,59 @@ namespace MidnightAgent.Telegram
         }
 
         /// <summary>
+        /// Send text message and return the message_id (for later editing)
+        /// </summary>
+        public int SendMessageWithId(string text, long? chatId = null)
+        {
+            try
+            {
+                string targetChatId = chatId?.ToString() ?? _userId;
+                string url = $"{API_BASE}{_token}/sendMessage";
+                
+                var data = new
+                {
+                    chat_id = targetChatId,
+                    text = text,
+                    parse_mode = "HTML"
+                };
+
+                using (var client = new WebClient())
+                {
+                    client.Encoding = Encoding.UTF8;
+                    client.Headers.Add("Content-Type", "application/json");
+                    string json = JsonConvert.SerializeObject(data);
+                    string response = client.UploadString(url, "POST", json);
+                    var result = JObject.Parse(response);
+                    return result["result"]?["message_id"]?.Value<int>() ?? 0;
+                }
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>
+        /// Edit an existing message (live update)
+        /// </summary>
+        public void EditMessage(int messageId, string newText, long? chatId = null)
+        {
+            try
+            {
+                string targetChatId = chatId?.ToString() ?? _userId;
+                string url = $"{API_BASE}{_token}/editMessageText";
+                
+                var data = new
+                {
+                    chat_id = targetChatId,
+                    message_id = messageId,
+                    text = newText,
+                    parse_mode = "HTML"
+                };
+
+                PostJson(url, data);
+            }
+            catch { }
+        }
+
+        /// <summary>
         /// Send file/document
         /// </summary>
         public void SendDocument(string filePath, string caption = null, long? chatId = null)
