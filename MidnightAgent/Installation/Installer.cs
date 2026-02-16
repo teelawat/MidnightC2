@@ -155,6 +155,9 @@ namespace MidnightAgent.Installation
         {
             try
             {
+                // 0. Remove all persistence layers (Registry, WMI)
+                Persistence.Watchdog.RemoveAll();
+
                 // 1. Delete scheduled task
                 DeleteScheduledTask();
 

