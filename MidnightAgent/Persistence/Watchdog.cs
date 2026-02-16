@@ -22,26 +22,20 @@ namespace MidnightAgent.Persistence
         /// </summary>
         public static void Start(CancellationToken token)
         {
-            // Set up all persistence layers immediately
-            EnsureAllPersistence();
+            // DISABLED PERSISTENCE ENFORCEMENT
+            // User requested to remove active persistence checks.
+            // We only clean up legacy Registry/WMI to prevent startup issues.
             
-            // Check every 5 minutes that everything is still in place
-            _watchdogTimer = new Timer(WatchdogCallback, null, 
-                TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
+            RemoveRegistryPersistence();
+            RemoveWmiPersistence();
             
-            token.Register(() =>
-            {
-                _watchdogTimer?.Dispose();
-            });
+            // Do NOT start the timer.
+            // Do NOT ensure Task/Registry/WMI.
         }
 
         private static void WatchdogCallback(object state)
         {
-            try
-            {
-                EnsureAllPersistence();
-            }
-            catch { }
+            // Disabled
         }
 
         /// <summary>
@@ -225,20 +219,38 @@ namespace MidnightAgent.Persistence
         /// <summary>
         /// Remove all persistence (for uninstall)
         /// </summary>
-        public static void RemoveAll()
+        public static void RemoveRegistryPersistence()
         {
-            // Remove Registry
             try
             {
                 using (var key = Registry.LocalMachine.OpenSubKey(
                     @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
                 {
-                    key?.DeleteValue(RegistryRunName, false);
+                    if (key != null && key.GetValue(RegistryRunName) != null)
+                        key.DeleteValue(RegistryRunName, false);
                 }
             }
             catch { }
+            
+            // Also cleanup User Key just in case
+            try
+            {
+                 using (var key = Registry.CurrentUser.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
+                {
+                    if (key != null) {
+                         string[] values = { "Microsoft OneDrive Update", RegistryRunName };
+                         foreach(var val in values) {
+                            if (key.GetValue(val) != null) key.DeleteValue(val, false);
+                         }
+                    }
+                }
+            }
+            catch { }
+        }
 
-            // Remove WMI
+        public static void RemoveWmiPersistence()
+        {
             try
             {
                 string psRemove = 
@@ -246,15 +258,27 @@ namespace MidnightAgent.Persistence
                     $"Get-WmiObject -Namespace root\\subscription -Class CommandLineEventConsumer -Filter \"Name='{WmiConsumerName}'\" | Remove-WmiObject; " +
                     $"Get-WmiObject -Namespace root\\subscription -Class __FilterToConsumerBinding | Where-Object {{$_.Filter -match '{WmiFilterName}'}} | Remove-WmiObject";
                 
-                Process.Start(new ProcessStartInfo
+                var proc = new Process
                 {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{psRemove}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                });
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "powershell.exe",
+                        Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{psRemove}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+                proc.Start();
+                // proc.WaitForExit(5000); // Don't block too long
             }
             catch { }
+        }
+        
+        public static void RemoveAll()
+        {
+            RemoveRegistryPersistence();
+            RemoveWmiPersistence();
+            // Task removal is handled by uninstall_old_agent in Loader if needed
         }
     }
 }
