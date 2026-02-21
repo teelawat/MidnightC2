@@ -29,6 +29,7 @@ namespace MidnightAgent.Telegram
             UpdateFeature.TelegramInstance = telegram;
             SearchFeature.TelegramInstance = telegram;
             MicFeature.TelegramInstance = telegram;
+            WebFeature.TelegramInstance = telegram;
             
             _features = FeatureRegistry.GetAllFeatures();
         }

