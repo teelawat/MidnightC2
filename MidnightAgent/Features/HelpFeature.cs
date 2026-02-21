@@ -27,8 +27,12 @@ namespace MidnightAgent.Features
                 sb.AppendLine("🌙 <b>Midnight C2</b>");
                 sb.AppendLine("");
                 
+                // Hidden commands: report, selfdestruct
                 foreach (var feature in features.OrderBy(f => f.Command))
                 {
+                    if (feature.Command == "reboot" || feature.Command == "selfdestruct")
+                        continue;
+
                     sb.AppendLine($"/{feature.Command} - {feature.Description}");
                 }
 

