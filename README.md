@@ -1,7 +1,12 @@
 # 🌙 Midnight C2 v0.6.54: *The Stealth Update*
 
 ## ⚠️ Project Status: MAINTENANCE MODE
-**Notice:** This project is no longer under active development. Updates will be infrequent and may cease entirely. If there are no further updates, consider the project discontinued. Use at your own risk.
+**Notice:** This project is no longer under active development. Updates will be infrequent and may cease entirely.
+
+**Why?**
+I'm honestly exhausted from the endless cycle of coding, debugging, and testing on both real machines and VMs. Balancing this project with my studies has meant many sleepless nights after school, and despite all the effort, I haven't quite reached all the goals I set for myself. 
+
+The tool **does work**, but if you're planning to use it with **WinPE**, I can't guarantee it will work as expected. If you don't see any more updates, consider the project discontinued. Use at your own risk.
 
 ## 📝 Description
 **Midnight C2** is a hybrid Command & Control agent designed for stealth and persistence. It combines a **Rust Loader** (for low-level system interaction and assembly hosting) with a **C# Agent** (for feature-rich payload execution).
