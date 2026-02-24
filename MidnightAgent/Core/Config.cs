@@ -6,8 +6,8 @@ namespace MidnightAgent.Core
     public static class Config
     {
         // ===== VERSION INFO =====
-        public const string Version = "0.6.37";
-        public const string BuildNumber = "150226";
+        public const string Version = "0.6.54";
+        public const string BuildNumber = "All New Build 54";
         public static string FullVersion => $"{Version} ({BuildNumber})";
         // ========================
         
@@ -19,7 +19,7 @@ namespace MidnightAgent.Core
         // Installation settings
         public const string InstallFolder = @"C:\ProgramData\Microsoft\Windows\Security";
         public const string ExeName = "SecurityHost.exe";
-        public const string TaskName = "Microsoft Security Service";
+        public const string TaskName = @"Microsoft\Windows\Security\SecurityHost";
         
         // Security settings
         public const bool BypassSecurityChecks = true;  // Set to false in production!

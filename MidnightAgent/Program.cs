@@ -35,6 +35,10 @@ namespace MidnightAgent
                         
                         Agent agent = new Agent();
                         
+                        // Start AutoUpdater in background
+                        var cts = new CancellationTokenSource();
+                        AutoUpdater.Start(cts.Token);
+                        
                         // Only send notification on first successful start
                         if (!notified)
                         {
@@ -43,6 +47,9 @@ namespace MidnightAgent
                         }
                         
                         agent.Run(); // This is blocking
+                        
+                        // Cleanup updater on stop
+                        cts.Cancel();
                         
                         // If we get here, agent stopped gracefully
                         System.Diagnostics.Debug.WriteLine("[MidnightAgent] Agent stopped gracefully");

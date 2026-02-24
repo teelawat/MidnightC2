@@ -60,6 +60,37 @@ namespace MidnightAgent.Core
             _enabled = false;
         }
 
+        public static string Read()
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    if (File.Exists(LogPath))
+                    {
+                        return File.ReadAllText(LogPath);
+                    }
+                }
+            }
+            catch { }
+            return "Log file empty or not found.";
+        }
+
+        public static void Clear()
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    if (File.Exists(LogPath))
+                    {
+                        File.Delete(LogPath);
+                    }
+                }
+            }
+            catch { }
+        }
+
         public static string GetLogPath() => LogPath;
     }
 }

