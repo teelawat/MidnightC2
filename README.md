@@ -1,57 +1,66 @@
-# 🌙 Midnight C2 v0.6.8: *The "It Works on My Machine" Edition*
+# 🌙 Midnight C2 v0.6.54: *The Stealth Update*
 
-Welcome to **Midnight C2**, a hybrid C2 agent that tries its best to be stealthy, but mostly just tries its best to exist. It's a Frankenstein's monster of **Rust** (the brain) and **C#** (the brawn), living together in the same process like roommates who don't really get along but have to share the rent.
+## ⚠️ Project Status: MAINTENANCE MODE
+**Notice:** This project is no longer under active development. Updates will be infrequent and may cease entirely. If there are no further updates, consider the project discontinued. Use at your own risk.
 
-> **⚠️ DISCLAIMER:** This project is for educational purposes and ethical security testing only. If you use this to do anything illegal, you're on your own. Also, if it breaks your computer, don't say I didn't warn you.
+## 📝 Description
+**Midnight C2** is a hybrid Command & Control agent designed for stealth and persistence. It combines a **Rust Loader** (for low-level system interaction and assembly hosting) with a **C# Agent** (for feature-rich payload execution).
 
----
-
-## 🛠 What's inside (The Cool Stuff)
-
-We've upgraded the architecture to be more "tactical" (which is a fancy word for "harder to see"):
-
-*   **Hybrid In-Process Execution:** The Rust loader (the `.exe`) literally hosts the .NET runtime inside itself. The C# Agent doesn't even have its own process. It's like a ghost in the machine.
-*   **Bypasses? We've heard of them:**
-    *   **AMSI Bypass:** We patch `AmsiScanBuffer` because we don't like being judged by Antivirus.
-    *   **ETW Bypass:** We patch `EtwEventWrite` because what Windows doesn't know won't hurt us.
-    *   **Defender Exclusion:** We ask Windows Defender nicely (via PowerShell) to please ignore our folder. It usually says yes.
-*   **Rust-Powered Stability:** The main loop is in Rust, which means it will keep trying to restart the C# agent even if it crashes (which it will).
-*   **Telegram C2:** Control everything via Telegram. Because why build a web UI when Mark Zuckerberg (or Pavel Durov) already did it for you?
+> **⚠️ DISCLAIMER:** This project is for educational purposes and authorized security testing only. The author is not responsible for any misuse or damage caused by this tool.
 
 ---
 
-## 🤡 The "Manage Your Expectations" Section
-
-Before you go thinking you've found the next APT tool, please keep the following in mind:
-
-1.  **Antivirus is smart, we are not:** While we have bypasses, Windows Defender is a billion-dollar product. If it catches you, don't be surprised.
-2.  **Network issues:** If the internet drops for 0.001 seconds, the agent might decide to take a permanent nap. We added a retry loop, but even that has its limits.
-3.  **The "3-Second Rule":** After installation, the UI closes in 3 seconds. Why 3? Because 2 felt too short and 4 felt like an eternity. 
-4.  **Admin Rights:** If you don't run as Admin, nothing works. Period. Don't even try. It'll just show you a pretty black window and tell you "No."
-5.  **It's a Lab Project:** This was built for fun and learning. Expect bugs. Many, many bugs. Some might even be accidental features.
+## 🛠 Features (v0.6.54)
+*   **Hybrid Execution:** Rust loader hosts the .NET CLR and executes the C# Agent in-process.
+*   **Alternative Data Stream (ADS) Loading:** The Agent DLL is hidden within the `:metadata` stream of the executable, bypassing basic file-based detection.
+*   **In-Memory Auto-Updater:** Updates are downloaded as ZIP files from Dropbox directly into RAM and executed without writing the update to disk.
+*   **AMSI & ETW Bypasses:** Dynamic patching of `AmsiScanBuffer` and `EtwEventWrite` to evade detection.
+*   **Telegram Command & Control:** Control your agents through a simple Telegram Bot interface.
+*   **Robust Persistence:** Enforced UTF-16 Task Scheduler XML for reliable persistence in `C:\ProgramData\Microsoft\Windows\Security`.
 
 ---
 
-## 🚀 How to Build & Deploy
+## 🚀 Build Instructions
 
-### Standard Deployment
-1.  **Configure your Bot:** Edit `MidnightAgent/Core/Config.cs`.
-2.  **Run:** `build_all.bat`.
-3.  **Deploy:** Take `midnight_loader.exe` and run as Admin.
+### Prerequisites
+1.  **Visual Studio 2022:** Install "Desktop development with C++" and ".NET desktop development".
+2.  **Rust:** Install via [rustup.rs](https://rustup.rs/). Make sure the `x86_64-pc-windows-msvc` toolchain is present.
+3.  **.NET SDK:** Required for building the C# project.
 
-### 🛠 WinPE Offline Infection (HBCD PE)
-1.  **Prepare USB:** Copy `midnight_loader.exe` and `winpe_injector.ps1` to your USB root.
-2.  **Boot:** Boot the target machine via USB (HBCD PE).
-3.  **Execute:** Open PowerShell and run:
-    ```powershell
-    cd X:\  # (Where X is your USB drive)
-    powershell.exe -ExecutionPolicy Bypass -File winpe_injector.ps1
+### Step-by-Step Build
+1.  **Configuration:** 
+    *   Open `MidnightAgent/Core/Config.cs`.
+    *   Set your `BotToken` and `ChatId`.
+    *   (Optional) Adjust `Version` and `BuildNumber`.
+2.  **Build All:**
+    *   Open a CMD/PowerShell terminal in the root directory.
+    *   Run the provided build script:
+    ```cmd
+    build_all.bat
     ```
-4.  **Result:** The script will hijack the `Consolidator` task. Unplug USB and reboot.
+    *   *Note: The script first builds the C# Agent because the Rust Loader needs to embed the resulting DLL.*
+3.  **Output:**
+    *   Your final stealth executable will be located at:
+    `MidnightLoader\target\release\midnight_loader.exe`
 
 ---
 
-## 📄 Final Warning
-Actually, don't pray. Just assume it will work 50% of the time, 100% of the time. If you find a bug, fix it yourself or join the club of people who like to watch things burn.
+## 🕹 Deployment & Usage
+
+### Manual Execution
+*   Copy `midnight_loader.exe` to the target.
+*   Run as **Administrator** for full persistence and features.
+*   The agent will install itself to `C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe`.
+
+### Offline Injection (WinPE)
+*   **Option A (Automatic):** Use `build_winpe.ps1` to create a bootable `.iso`. Booting from this ISO will automatically inject the payload into the target Windows drive.
+*   **Option B (Manual):** Use `winpe_injector.ps1` from a WinPE environment (like HBCD) to manually inject the payload into a target system's offline Registry and Tasks.
+
+---
+
+## 📄 Support & Updates
+As stated above, this project is in maintenance mode. 
+*   **Bug Reports:** Feel free to open issues, but they may not be addressed.
+*   **Contributions:** Pull requests are welcome if you wish to improve the tool yourself.
 
 **Happy Hacking!** 🌙🚀
