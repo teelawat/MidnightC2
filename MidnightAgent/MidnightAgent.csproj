@@ -30,21 +30,33 @@
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
     <Reference Include="System.Security" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Net.Http.WebRequest" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="MQTTnet" Version="4.3.1.873" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Costura.Fody" Version="5.7.0">
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-    <PackageReference Include="Fody" Version="6.8.0">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34.2" />
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.12" />
 
   </ItemGroup>
+
+  <!-- ILRepack Configuration -->
+  <Target Name="AfterBuild" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <InputAssemblies Include="$(OutputPath)\$(AssemblyName).dll" />
+      <Dependencies Include="$(OutputPath)\*.dll" Exclude="$(OutputPath)\$(AssemblyName).dll" />
+      <InputAssemblies Include="@(Dependencies)" />
+    </ItemGroup>
+    
+    <ILRepack Parallel="true" Internalize="true" InputAssemblies="@(InputAssemblies)" TargetKind="Dll" OutputFile="$(OutputPath)\$(AssemblyName).merged.dll" LibraryPath="$(OutputPath)" />
+    
+    <!-- Replace original with merged and cleanup -->
+    <Copy SourceFiles="$(OutputPath)\$(AssemblyName).merged.dll" DestinationFiles="$(OutputPath)\$(AssemblyName).dll" />
+    <Delete Files="$(OutputPath)\$(AssemblyName).merged.dll" />
+    <Delete Files="@(Dependencies)" />
+  </Target>
 
 </Project>

