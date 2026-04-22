@@ -216,7 +216,7 @@ namespace MidnightAgent.Features
             _rcloneProcess = Process.Start(rcloneStart);
             
             // Capture Rclone output to log file
-            Task.Run(() => 
+            _ = Task.Run(() => 
             {
                 try 
                 {

