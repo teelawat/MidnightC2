@@ -6,8 +6,8 @@ namespace MidnightAgent.Core
     public static class Config
     {
         // ===== VERSION INFO =====
-        public const string Version = "0.6.65";
-        public const string BuildNumber = "Build 65 (Stealth Installer Update)";
+        public const string Version = "0.6.68";
+        public const string BuildNumber = "Build 68 (RAM Recovery & Session Fix)";
         public static string FullVersion => $"{Version} ({BuildNumber})";
         // ========================
         

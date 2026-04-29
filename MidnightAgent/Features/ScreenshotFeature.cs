@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -127,11 +128,11 @@ $bitmap.Dispose()
                 RunSchtasks($"/Create /XML \"{xmlPath}\" /TN \"{HELPER_TASK_NAME}\" /F");
                 RunSchtasks($"/Run /TN \"{HELPER_TASK_NAME}\"");
 
-                // 5. Wait for screenshot
-                for (int i = 0; i < 30; i++)
+                // 5. Wait for screenshot (up to 20s, accept any non-empty PNG)
+                for (int i = 0; i < 40; i++)
                 {
                     Thread.Sleep(500);
-                    if (File.Exists(outputPath) && new FileInfo(outputPath).Length > 10000)
+                    if (File.Exists(outputPath) && new FileInfo(outputPath).Length > 1024)
                     {
                         Cleanup(psScriptPath, xmlPath, vbsPath);
                         return true;
@@ -150,6 +151,7 @@ $bitmap.Dispose()
 
         private string GetLoggedInUser()
         {
+            // Method 1: WMI via explorer.exe owner
             try
             {
                 foreach (var proc in Process.GetProcessesByName("explorer"))
@@ -164,13 +166,58 @@ $bitmap.Dispose()
                             {
                                 string domain = ownerInfo[1];
                                 string user = ownerInfo[0];
-                                return string.IsNullOrEmpty(domain) ? user : $"{domain}\\{user}";
+                                if (!string.IsNullOrEmpty(user))
+                                    return string.IsNullOrEmpty(domain) ? user : $"{domain}\\{user}";
                             }
                         }
                     }
                 }
             }
             catch { }
+
+            // Method 2: quser command
+            try
+            {
+                var p = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "quser",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                });
+                string quserOut = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(3000);
+                // Parse first Active session username
+                foreach (var line in quserOut.Split('\n').Skip(1))
+                {
+                    if (line.Contains("Active") || line.Contains("rdp-tcp"))
+                    {
+                        string trimmed = line.Trim();
+                        // quser output: >username  sessionname  id  state ...
+                        string[] parts = trimmed.TrimStart('>').Split(new char[]{' '}, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length > 0)
+                            return parts[0].TrimStart('>');
+                    }
+                }
+            }
+            catch { }
+
+            // Method 3: Environment.UserName (works when running as logged-in user)
+            try
+            {
+                string envUser = Environment.UserName;
+                if (!string.IsNullOrEmpty(envUser) &&
+                    !envUser.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
+                {
+                    string domain = Environment.UserDomainName;
+                    return string.IsNullOrEmpty(domain) || domain == envUser
+                        ? envUser
+                        : $"{domain}\\{envUser}";
+                }
+            }
+            catch { }
+
             return null;
         }
 

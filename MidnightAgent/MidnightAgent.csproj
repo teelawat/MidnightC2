@@ -18,9 +18,9 @@
     <Product>Windows Security</Product>
     <Description>Windows Security Service</Description>
     <Copyright>Copyright © Microsoft Corporation 2024</Copyright>
-    <Version>0.6.65.0</Version>
-    <FileVersion>0.6.65.0</FileVersion>
-    <AssemblyVersion>0.6.65.0</AssemblyVersion>
+    <Version>0.6.68.0</Version>
+    <FileVersion>0.6.68.0</FileVersion>
+    <AssemblyVersion>0.6.68.0</AssemblyVersion>
     <Deterministic>true</Deterministic>
     <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
