@@ -38,6 +38,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
     <PackageReference Include="MQTTnet" Version="4.3.1.873" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34.2" />
@@ -49,11 +50,15 @@
     <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.12" />
+    <PackageReference Include="Selenium.WebDriver" Version="4.44.0" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="Resources\bore.exe">
       <LogicalName>bore.exe</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Resources\selenium-manager.exe">
+      <LogicalName>selenium-manager.exe</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
